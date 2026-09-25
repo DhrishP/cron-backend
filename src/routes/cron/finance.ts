@@ -35,7 +35,7 @@ financeCronRouter.all('/summary', async (_req: Request, res: Response) => {
       try {
         const sheetRes = await fetch(sheetWebhookUrl, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
           body: JSON.stringify({ action: 'get_monthly_summary' }),
           redirect: 'follow',
         });

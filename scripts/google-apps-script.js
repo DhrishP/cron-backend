@@ -26,74 +26,106 @@ function doPost(e) {
         .setMimeType(ContentService.MimeType.JSON);
     }
 
-    // 2. Handle dynamic amortization / tag update from Telegram callback
-    if (data.action === 'update_tag' && data.row) {
+    // 2. Handle dynamic amortization / split from Telegram callback
+    if (data.action === 'update_tag') {
       var row = parseInt(data.row, 10);
       var duration = parseInt(data.duration, 10) || 1;
       var tag = data.tag || 'Amortized';
 
-      var amount = parseFloat(sheet.getRange(row, 4).getValue()) || 0; // Column D = Amount
-      var origTitle = (sheet.getRange(row, 2).getValue() || '').toString(); // Column B = Title
-      var origDateVal = sheet.getRange(row, 1).getValue(); // Column A = Date
+      var allData = sheet.getDataRange().getValues();
+      var lastRow = sheet.getLastRow();
 
-      // Clean title from previous tag suffixes if any
+      var targetRow = row;
+      var currentAmount = 0;
+
+      if (targetRow >= 2 && targetRow <= lastRow) {
+        currentAmount = parseFloat(sheet.getRange(targetRow, 4).getValue()) || 0;
+      }
+
+      // If targetRow has 0 amount (e.g. user clicked on a future row or index was offset),
+      // auto-find the latest real transaction that has amount > 0
+      if (currentAmount <= 0) {
+        for (var r = allData.length - 1; r >= 1; r--) {
+          var amt = parseFloat(allData[r][3]) || 0;
+          var t = (allData[r][2] || '').toString();
+          if (amt > 0 && t !== 'Amortized') {
+            targetRow = r + 1; // 1-indexed row number
+            currentAmount = amt;
+            break;
+          }
+        }
+      }
+
+      var origTitle = (sheet.getRange(targetRow, 2).getValue() || '').toString();
+      var origDateVal = sheet.getRange(targetRow, 1).getValue();
+      currentAmount = parseFloat(sheet.getRange(targetRow, 4).getValue()) || currentAmount;
+
+      // Clean title from previous suffix like " (1/3)"
       var baseTitle = origTitle.replace(/\s*\(\d+\/\d+\)/g, '').trim();
 
-      if (duration > 1) {
-        var effective = Math.round((amount / duration) * 100) / 100;
+      if (duration > 1 && currentAmount > 0) {
+        // Split amount evenly across all duration months
+        var splitAmount = Math.round((currentAmount / duration) * 100) / 100;
         var tagLabel = 'Amortized (' + duration + 'mo)';
 
-        // Update Month 1 row
-        sheet.getRange(row, 2).setValue(baseTitle + ' (1/' + duration + ')');
-        sheet.getRange(row, 5).setValue(tagLabel);
-        sheet.getRange(row, 6).setValue(effective);
+        // 1. Update Month 1 row (Original row)
+        sheet.getRange(targetRow, 2).setValue(baseTitle + ' (1/' + duration + ')');
+        sheet.getRange(targetRow, 4).setValue(splitAmount); // Amount = split amount
+        sheet.getRange(targetRow, 5).setValue(tagLabel);
+        sheet.getRange(targetRow, 6).setValue(splitAmount); // Effective Monthly = split amount
 
         // Parse base date
         var origDate = parseDateValue(origDateVal);
 
-        // Generate future rows for months 2 .. duration
+        // 2. Generate exactly (duration - 1) future rows for months 2 to duration
         var futureRows = [];
         for (var m = 2; m <= duration; m++) {
           var futureDate = new Date(origDate.getFullYear(), origDate.getMonth() + (m - 1), origDate.getDate());
           var formattedFutureDate = formatDate(futureDate);
           var futureTitle = baseTitle + ' (' + m + '/' + duration + ')';
           var futureType = 'Amortized';
-          var futureAmount = 0; // Bank debit is 0 because entire amount was debited in Month 1
+          var futureAmount = splitAmount; // Split amount (not 0!)
           var futureTag = tagLabel;
-          var futureEffective = effective;
-          var futureRaw = 'Auto-amortized (Month ' + m + '/' + duration + ' of Row ' + row + ')';
+          var futureEffective = splitAmount;
+          var futureRaw = 'Split ' + m + '/' + duration + ' of ' + baseTitle + ' (₹' + currentAmount + ' total)';
 
           futureRows.push([formattedFutureDate, futureTitle, futureType, futureAmount, futureTag, futureEffective, futureRaw]);
         }
 
         if (futureRows.length > 0) {
-          var startRow = sheet.getLastRow() + 1;
-          sheet.getRange(startRow, 1, futureRows.length, 7).setValues(futureRows);
+          var appendStart = sheet.getLastRow() + 1;
+          sheet.getRange(appendStart, 1, futureRows.length, 7).setValues(futureRows);
         }
+
+        // Always keep sheet sorted chronologically by Date
+        sortSheetByDate(sheet);
 
         return ContentService
           .createTextOutput(JSON.stringify({
             status: 'success',
-            row: row,
+            row: targetRow,
             tag: tagLabel,
             duration: duration,
-            monthlyCost: effective,
+            totalAmount: currentAmount,
+            monthlyCost: splitAmount,
             createdRows: futureRows.length
           }))
           .setMimeType(ContentService.MimeType.JSON);
 
       } else if (tag === 'Emergency') {
-        sheet.getRange(row, 5).setValue('Emergency');
-        sheet.getRange(row, 6).setValue(0);
+        sheet.getRange(targetRow, 5).setValue('Emergency');
+        sheet.getRange(targetRow, 6).setValue(0);
+        sortSheetByDate(sheet);
         return ContentService
-          .createTextOutput(JSON.stringify({ status: 'success', row: row, tag: 'Emergency', effective: 0 }))
+          .createTextOutput(JSON.stringify({ status: 'success', row: targetRow, tag: 'Emergency', effective: 0 }))
           .setMimeType(ContentService.MimeType.JSON);
 
       } else {
-        sheet.getRange(row, 5).setValue(tag || 'Normal');
-        sheet.getRange(row, 6).setValue(amount);
+        sheet.getRange(targetRow, 5).setValue(tag || 'Normal');
+        sheet.getRange(targetRow, 6).setValue(currentAmount);
+        sortSheetByDate(sheet);
         return ContentService
-          .createTextOutput(JSON.stringify({ status: 'success', row: row, tag: tag || 'Normal', effective: amount }))
+          .createTextOutput(JSON.stringify({ status: 'success', row: targetRow, tag: tag || 'Normal', effective: currentAmount }))
           .setMimeType(ContentService.MimeType.JSON);
       }
     }
@@ -129,10 +161,23 @@ function doPost(e) {
     }
 
     sheet.appendRow([date, title, type, amount, tag, effectiveMonthly, raw]);
-    var lastRow = sheet.getLastRow();
+    var insertedRow = sheet.getLastRow();
+
+    // Always sort sheet chronologically by Date
+    sortSheetByDate(sheet);
+
+    // Find the exact row index of the transaction after sorting
+    var afterSortData = sheet.getDataRange().getValues();
+    var finalRow = insertedRow;
+    for (var i = afterSortData.length - 1; i >= 1; i--) {
+      if (afterSortData[i][1] === title && afterSortData[i][6] === raw) {
+        finalRow = i + 1;
+        break;
+      }
+    }
 
     return ContentService
-      .createTextOutput(JSON.stringify({ status: 'success', row: lastRow }))
+      .createTextOutput(JSON.stringify({ status: 'success', row: finalRow }))
       .setMimeType(ContentService.MimeType.JSON);
 
   } catch (err) {
@@ -140,6 +185,27 @@ function doPost(e) {
       .createTextOutput(JSON.stringify({ status: 'error', message: err.toString() }))
       .setMimeType(ContentService.MimeType.JSON);
   }
+}
+
+/**
+ * Sorts all data rows (Row 2 to lastRow) chronologically by Date (Column A).
+ * Handles DD/MM/YYYY, DD-MM-YYYY, or Native Date objects.
+ */
+function sortSheetByDate(sheet) {
+  var lastRow = sheet.getLastRow();
+  if (lastRow <= 2) return; // Only 0 or 1 data row
+
+  var numColumns = Math.max(sheet.getLastColumn(), 7);
+  var range = sheet.getRange(2, 1, lastRow - 1, numColumns);
+  var values = range.getValues();
+
+  values.sort(function(a, b) {
+    var timeA = parseDateValue(a[0]).getTime();
+    var timeB = parseDateValue(b[0]).getTime();
+    return timeA - timeB;
+  });
+
+  range.setValues(values);
 }
 
 function parseDateValue(val) {
@@ -218,6 +284,11 @@ function getMonthlySummary(sheet) {
 }
 
 function doGet(e) {
+  try {
+    var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+    sortSheetByDate(sheet);
+  } catch (err) {}
+
   return ContentService
     .createTextOutput(JSON.stringify({ status: 'ok', message: 'Spends Tracker API is active' }))
     .setMimeType(ContentService.MimeType.JSON);

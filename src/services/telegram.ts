@@ -213,11 +213,11 @@ export async function handleTelegramCallback(callbackQuery: {
   let createdFutureRows = 0;
   let monthlyCost = 0;
 
-  if (sheetWebhookUrl && row > 0) {
+  if (sheetWebhookUrl) {
     try {
       const res = await fetch(sheetWebhookUrl, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
         body: JSON.stringify({
           action: 'update_tag',
           row,
@@ -228,6 +228,7 @@ export async function handleTelegramCallback(callbackQuery: {
       });
       const resJson = await res.json() as {
         status?: string;
+        row?: number;
         createdRows?: number;
         monthlyCost?: number;
       };
@@ -258,18 +259,18 @@ export async function handleTelegramCallback(callbackQuery: {
       confirmationText += `✅ <b>Amortized over ${duration} months${perMo}</b>`;
       if (createdFutureRows > 0) {
         confirmationText += `\n📊 Generated ${createdFutureRows} future monthly rows in Google Sheet!`;
-      } else if (row > 0 && updateSuccess) {
-        confirmationText += `\n📊 Google Sheet Row ${row} updated!`;
+      } else if (updateSuccess) {
+        confirmationText += `\n📊 Google Sheet updated!`;
       }
     } else if (tagName === 'Emergency') {
       confirmationText += `✅ <b>Tagged as: Emergency</b> (Excluded from monthly baseline)`;
-      if (row > 0 && updateSuccess) {
-        confirmationText += `\n📊 Google Sheet Row ${row} updated!`;
+      if (updateSuccess) {
+        confirmationText += `\n📊 Google Sheet updated!`;
       }
     } else {
       confirmationText += `✅ <b>Tagged as: ${tagName}</b>`;
-      if (row > 0 && updateSuccess) {
-        confirmationText += `\n📊 Google Sheet Row ${row} updated!`;
+      if (updateSuccess) {
+        confirmationText += `\n📊 Google Sheet updated!`;
       }
     }
 
@@ -325,7 +326,7 @@ export async function handleDirectTextMessage(chatId: string | number, text: str
       try {
         const sheetRes = await fetch(sheetWebhookUrl, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
           body: JSON.stringify({ action: 'get_monthly_summary' }),
           redirect: 'follow',
         });
@@ -366,7 +367,7 @@ export async function handleDirectTextMessage(chatId: string | number, text: str
       try {
         const forwardResponse = await fetch(sheetWebhookUrl, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
           body: JSON.stringify({
             date: new Date().toLocaleDateString('en-IN'),
             title: parsed.title,

@@ -112,7 +112,7 @@ macrodroidRouter.post('/', async (req: Request, res: Response) => {
       try {
         const forwardResponse = await fetch(sheetWebhookUrl, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
           body: JSON.stringify({
             date: new Date().toLocaleDateString('en-IN'),
             title: parsed.title,
