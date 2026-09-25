@@ -45,6 +45,7 @@ macrodroidRouter.post('/', async (req: Request, res: Response) => {
             sender,
             parsed,
           }),
+          redirect: 'follow',
         });
         forwardStatus = forwardResponse.ok ? 'forwarded' : 'failed';
       } catch (fwdErr) {
