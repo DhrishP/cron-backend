@@ -56,7 +56,16 @@ export function parseBankSms(sms: string, sender = ''): ParsedTransaction {
     effectiveMonthlyCost = 0; // Excluded from monthly recurring baseline
   }
 
+  // 7. Fallback category determination
+  let category = 'General Expense';
+  if (type === 'ATM / Cash') category = 'Cash & ATM';
+  else if (suggestedTag === '1-Year Sub') category = 'Subscriptions & Internet';
+  else if (suggestedTag === 'Home / Tank Maintenance') category = 'Household Maintenance';
+  else if (type === 'Credit') category = 'Income / Refund';
+
   return {
+    title: merchant,
+    category,
     amount,
     type,
     merchant,
@@ -64,6 +73,8 @@ export function parseBankSms(sms: string, sender = ''): ParsedTransaction {
     rawSms: sms,
     suggestedTag,
     effectiveMonthlyCost,
+    notes: `Parsed via regex rules as ${suggestedTag}`,
     timestamp,
+    source: 'regex_fallback',
   };
 }

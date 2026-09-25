@@ -3,6 +3,8 @@ export type TransactionType = 'Debit' | 'Credit' | 'ATM / Cash';
 export type ExpenseTag = 'Normal' | '1-Year Sub' | 'Emergency' | 'Petty Cash' | 'Home / Tank Maintenance';
 
 export interface ParsedTransaction {
+  title: string;
+  category: string;
   amount: number;
   type: TransactionType;
   merchant: string;
@@ -10,7 +12,9 @@ export interface ParsedTransaction {
   rawSms: string;
   suggestedTag: ExpenseTag;
   effectiveMonthlyCost: number;
+  notes: string;
   timestamp: string;
+  source: 'ai_deepinfra' | 'regex_fallback';
 }
 
 export interface MacroDroidPayload {

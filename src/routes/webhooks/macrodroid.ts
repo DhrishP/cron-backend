@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { parseBankSms } from '../../services/smsParser.js';
+import { categorizeWithDeepInfra } from '../../services/deepinfra.js';
 import { logInfo, logError } from '../../services/logger.js';
 import { MacroDroidPayload } from '../../types/index.js';
 
@@ -19,14 +19,15 @@ macrodroidRouter.post('/', async (req: Request, res: Response) => {
       return;
     }
 
-    // Parse the SMS content
-    const parsed = parseBankSms(sms, sender);
+    // Categorize transaction using DeepInfra AI (falls back to regex automatically)
+    const parsed = await categorizeWithDeepInfra(sms, sender);
 
-    logInfo('MacroDroid SMS parsed successfully', {
+    logInfo('MacroDroid SMS classified successfully', {
+      title: parsed.title,
+      category: parsed.category,
       amount: parsed.amount,
-      type: parsed.type,
-      merchant: parsed.merchant,
       tag: parsed.suggestedTag,
+      source: parsed.source,
       effectiveMonthlyCost: parsed.effectiveMonthlyCost,
     });
 
