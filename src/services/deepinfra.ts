@@ -1,6 +1,6 @@
 import { ParsedTransaction, ExpenseTag, TransactionType } from '../types/index.js';
 import { logInfo, logError } from './logger.js';
-import { parseBankSms } from './smsParser.js';
+import { parseBankSms, cleanMacroDroidArtifacts } from './smsParser.js';
 
 interface DeepInfraJsonResponse {
   title?: string;
@@ -14,16 +14,20 @@ interface DeepInfraJsonResponse {
   notes?: string;
 }
 
-export async function categorizeWithDeepInfra(sms: string, sender = ''): Promise<ParsedTransaction> {
+export async function categorizeWithDeepInfra(rawSms: string, rawSender = ''): Promise<ParsedTransaction> {
+  const sms = cleanMacroDroidArtifacts(rawSms);
+  const sender = cleanMacroDroidArtifacts(rawSender);
+  const regexFallback = parseBankSms(sms, sender);
+
   const apiKey = process.env.DEEPINFRA_API_KEY;
 
   // Fallback to local regex engine if API key is not provided
   if (!apiKey) {
     logInfo('DEEPINFRA_API_KEY is not set. Using local regex parser.');
-    return parseBankSms(sms, sender);
+    return regexFallback;
   }
 
-  const model = process.env.DEEPINFRA_MODEL || 'meta-llama/Meta-Llama-3.1-8B-Instruct';
+  const model = process.env.DEEPINFRA_MODEL || 'deepseek-ai/DeepSeek-V4-Flash-0731';
 
   const systemPrompt = `You are an expert financial assistant analyzing transactional SMS messages in India.
 Your task is to extract transaction details into clean JSON.
@@ -73,14 +77,14 @@ Return ONLY a valid JSON object matching this schema:
     if (!response.ok) {
       const errorText = await response.text();
       logError(`DeepInfra API responded with HTTP ${response.status}`, errorText);
-      return parseBankSms(sms, sender);
+      return regexFallback;
     }
 
     const data = (await response.json()) as { choices?: Array<{ message?: { content?: string } }> };
     const rawContent = data.choices?.[0]?.message?.content;
     if (!rawContent) {
       logError('DeepInfra returned empty response content', data);
-      return parseBankSms(sms, sender);
+      return regexFallback;
     }
 
     const parsedAi: DeepInfraJsonResponse = JSON.parse(rawContent);
@@ -93,8 +97,21 @@ Return ONLY a valid JSON object matching this schema:
       amount: parsedAi.amount,
     });
 
-    const amount = typeof parsedAi.amount === 'number' ? parsedAi.amount : 0;
-    const tag: ExpenseTag = parsedAi.tag || 'Normal';
+    let amount = typeof parsedAi.amount === 'number' && parsedAi.amount > 0 ? parsedAi.amount : 0;
+    // Ground-truth fallback: If AI didn't catch amount but regex did, use regex amount!
+    if (amount <= 0 && regexFallback.amount > 0) {
+      amount = regexFallback.amount;
+    }
+
+    const tag: ExpenseTag = parsedAi.tag || regexFallback.suggestedTag || 'Normal';
+    const type: TransactionType = parsedAi.type || regexFallback.type || 'Debit';
+    const title = (parsedAi.title && parsedAi.title !== 'Expense' && parsedAi.title !== 'Unknown')
+      ? parsedAi.title
+      : regexFallback.title;
+    const merchant = (parsedAi.merchant && parsedAi.merchant !== 'Unknown')
+      ? parsedAi.merchant
+      : regexFallback.merchant;
+    const account = parsedAi.account || regexFallback.account || sender || 'Bank';
 
     // Verify / compute effectiveMonthlyCost safely
     let effectiveMonthlyCost = amount;
@@ -105,13 +122,13 @@ Return ONLY a valid JSON object matching this schema:
     }
 
     return {
-      title: parsedAi.title || parsedAi.merchant || 'Expense',
-      category: parsedAi.category || 'General Expense',
+      title,
+      category: parsedAi.category || regexFallback.category || 'General Expense',
       amount,
-      type: parsedAi.type || 'Debit',
-      merchant: parsedAi.merchant || parsedAi.title || 'Unknown',
-      account: parsedAi.account || sender,
-      rawSms: sms,
+      type,
+      merchant,
+      account,
+      rawSms: rawSms,
       suggestedTag: tag,
       effectiveMonthlyCost,
       notes: parsedAi.notes || 'Categorized with DeepInfra AI',
@@ -120,6 +137,6 @@ Return ONLY a valid JSON object matching this schema:
     };
   } catch (error) {
     logError('DeepInfra categorization failed, falling back to regex', error);
-    return parseBankSms(sms, sender);
+    return regexFallback;
   }
 }
