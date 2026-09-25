@@ -25,46 +25,30 @@ export async function categorizeWithDeepInfra(sms: string, sender = ''): Promise
 
   const model = process.env.DEEPINFRA_MODEL || 'meta-llama/Meta-Llama-3.1-8B-Instruct';
 
-  const systemPrompt = `You are an expert financial assistant analyzing transactional SMS messages in India (UPI, cards, net banking, ATM).
-Your task is to accurately extract transaction details and categorize them into clean, structured JSON.
+  const systemPrompt = `You are an expert financial assistant analyzing transactional SMS messages in India.
+Your task is to extract transaction details into clean JSON.
 
-Allowed categories:
-- "Food & Dining"
-- "Groceries"
-- "Utilities & Internet"
-- "Household Maintenance"
-- "Healthcare"
-- "Shopping"
-- "Transport"
-- "Entertainment"
-- "Income"
-- "Transfers"
-- "Cash & ATM"
-- "Other"
-
-Allowed tags:
-- "1-Year Sub": For annual plans/subscriptions (e.g., 1-year broadband/fibernet, annual Amazon/Netflix, domain renewals).
-- "Home / Tank Maintenance": For periodic infrequent household services (e.g., water tank cleaning, AC service, deep cleaning).
-- "Emergency": For unexpected urgent expenses (e.g., hospital, emergency clinic, urgent plumbing/appliance breakdown).
-- "Petty Cash": For ATM cash withdrawals under ₹1,000-2,000.
-- "Normal": For standard daily transactions.
+Tags:
+- "Yearly": For annual subscriptions, once-a-year expenses (e.g. 1-year internet, annual tank cleaning, yearly insurance).
+- "Emergency": For sudden unexpected emergency expenses (hospital, urgent repair).
+- "Normal": For standard day-to-day spending.
 
 Calculate effectiveMonthlyCost:
-- If tag is "1-Year Sub" or "Home / Tank Maintenance": amount / 12
-- If tag is "Emergency": 0 (so it doesn't skew monthly living budget)
+- If tag is "Yearly": amount / 12
+- If tag is "Emergency": 0
 - Otherwise: amount
 
 Return ONLY a valid JSON object matching this schema:
 {
   "title": "Clean Merchant Name (e.g. ACT Fibernet, Swiggy, Water Tank Cleaning)",
-  "category": "Exact Category Name",
+  "category": "Category Name (e.g. Utilities, Food, Household, Health)",
   "amount": 12000,
   "type": "Debit" | "Credit" | "ATM / Cash",
-  "merchant": "Merchant or entity",
+  "merchant": "Merchant name",
   "account": "e.g. A/c XX4321",
-  "tag": "Normal" | "1-Year Sub" | "Emergency" | "Petty Cash" | "Home / Tank Maintenance",
+  "tag": "Normal" | "Yearly" | "Emergency",
   "effectiveMonthlyCost": 1000,
-  "notes": "Brief explanation of tag and categorization"
+  "notes": "Brief explanation"
 }`;
 
   try {
@@ -114,7 +98,7 @@ Return ONLY a valid JSON object matching this schema:
 
     // Verify / compute effectiveMonthlyCost safely
     let effectiveMonthlyCost = amount;
-    if (tag === '1-Year Sub' || tag === 'Home / Tank Maintenance') {
+    if (tag === 'Yearly') {
       effectiveMonthlyCost = Math.round((amount / 12) * 100) / 100;
     } else if (tag === 'Emergency') {
       effectiveMonthlyCost = 0;

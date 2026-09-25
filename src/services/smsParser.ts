@@ -40,17 +40,15 @@ export function parseBankSms(sms: string, sender = ''): ParsedTransaction {
 
   // 5. Intelligent Tagging
   let suggestedTag: ExpenseTag = 'Normal';
-  if (type === 'ATM / Cash') {
-    suggestedTag = 'Petty Cash';
-  } else if (/annual|yearly|1-year|subscription|fibernet|broadband|act|airtel.*xstream|jiofiber/i.test(sms) || /annual|yearly/i.test(merchant)) {
-    suggestedTag = '1-Year Sub';
-  } else if (/hospital|clinic|emergency|pharma|repair|tank|plumber/i.test(sms) || /tank/i.test(merchant)) {
-    suggestedTag = /tank/i.test(sms) || /tank/i.test(merchant) ? 'Home / Tank Maintenance' : 'Emergency';
+  if (/annual|yearly|1-year|subscription|tank|broadband|act|fibernet/i.test(sms) || /annual|yearly|tank/i.test(merchant)) {
+    suggestedTag = 'Yearly';
+  } else if (/hospital|clinic|emergency|pharma|repair|plumber/i.test(sms)) {
+    suggestedTag = 'Emergency';
   }
 
   // 6. Calculate Effective Monthly Cost
   let effectiveMonthlyCost = amount;
-  if (suggestedTag === '1-Year Sub' || suggestedTag === 'Home / Tank Maintenance') {
+  if (suggestedTag === 'Yearly') {
     effectiveMonthlyCost = Math.round((amount / 12) * 100) / 100;
   } else if (suggestedTag === 'Emergency') {
     effectiveMonthlyCost = 0; // Excluded from monthly recurring baseline
@@ -59,8 +57,8 @@ export function parseBankSms(sms: string, sender = ''): ParsedTransaction {
   // 7. Fallback category determination
   let category = 'General Expense';
   if (type === 'ATM / Cash') category = 'Cash & ATM';
-  else if (suggestedTag === '1-Year Sub') category = 'Subscriptions & Internet';
-  else if (suggestedTag === 'Home / Tank Maintenance') category = 'Household Maintenance';
+  else if (suggestedTag === 'Yearly') category = 'Yearly Expenses';
+  else if (suggestedTag === 'Emergency') category = 'Emergency';
   else if (type === 'Credit') category = 'Income / Refund';
 
   return {
