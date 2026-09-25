@@ -24,8 +24,9 @@ export function createApp(): Express {
     });
   });
 
-  // Mount API router
+  // Mount API router on both /api and / (for convenience)
   app.use('/api', apiRouter);
+  app.use('/', apiRouter);
 
   // Fallback 404 handler
   app.use((req: Request, res: Response) => {
