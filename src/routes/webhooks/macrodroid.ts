@@ -8,17 +8,38 @@ export const macrodroidRouter = Router();
 
 macrodroidRouter.post('/', async (req: Request, res: Response) => {
   try {
-    const payload: MacroDroidPayload = req.body;
-    const sms = payload.sms || '';
-    const sender = payload.sender || '';
+    const payload: MacroDroidPayload = req.body || {};
+    logInfo('MacroDroid webhook received payload', { rawBody: req.body });
+
+    const sms = (
+      payload.sms ||
+      payload.notification ||
+      payload.not_text ||
+      payload.not_big_text ||
+      payload.text ||
+      payload.message ||
+      payload.body ||
+      (typeof req.body === 'string' ? req.body : '')
+    ).trim();
+
+    const sender = (
+      payload.sender ||
+      payload.not_title ||
+      payload.title ||
+      payload.not_app_name ||
+      ''
+    ).trim();
 
     if (!sms) {
+      logError('MacroDroid webhook received empty SMS/notification payload', { body: req.body });
       res.status(400).json({
         success: false,
-        error: 'Missing required field: "sms"',
+        error: 'Missing required content field: "sms", "notification", "not_text", or "body"',
       });
       return;
     }
+
+    logInfo('MacroDroid payload extracted', { sms, sender });
 
     // Categorize transaction using DeepInfra AI (falls back to regex automatically)
     const parsed = await categorizeWithDeepInfra(sms, sender);

@@ -20,6 +20,15 @@ export interface ParsedTransaction {
 export interface MacroDroidPayload {
   sms?: string;
   sender?: string;
+  notification?: string;
+  not_text?: string;
+  not_big_text?: string;
+  text?: string;
+  message?: string;
+  body?: string;
+  not_title?: string;
+  title?: string;
+  not_app_name?: string;
   timestamp?: string;
 }
 
