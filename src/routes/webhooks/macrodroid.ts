@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { categorizeWithDeepInfra } from '../../services/deepinfra.js';
+import { sendTransactionAlert } from '../../services/telegram.js';
 import { logInfo, logError } from '../../services/logger.js';
 import { MacroDroidPayload } from '../../types/index.js';
 
@@ -34,6 +35,7 @@ macrodroidRouter.post('/', async (req: Request, res: Response) => {
     // Optional: Forward to Google Sheets Web App if configured
     const sheetWebhookUrl = process.env.GOOGLE_SHEET_WEBHOOK_URL;
     let forwardStatus = 'skipped';
+    let loggedRow: number | undefined;
 
     if (sheetWebhookUrl) {
       try {
@@ -47,17 +49,30 @@ macrodroidRouter.post('/', async (req: Request, res: Response) => {
           }),
           redirect: 'follow',
         });
-        forwardStatus = forwardResponse.ok ? 'forwarded' : 'failed';
+        if (forwardResponse.ok) {
+          forwardStatus = 'forwarded';
+          const resData = await forwardResponse.json() as { row?: number };
+          loggedRow = resData.row;
+        } else {
+          forwardStatus = 'failed';
+        }
       } catch (fwdErr) {
         logError('Failed to forward to Google Sheets webhook', fwdErr);
         forwardStatus = 'error';
       }
     }
 
+    // If transaction is >= 1,500 INR, send Telegram notification with 1-tap tag selection
+    let telegramAlertSent = false;
+    if (parsed.amount >= 1500) {
+      telegramAlertSent = await sendTransactionAlert(parsed, loggedRow);
+    }
+
     res.status(200).json({
       success: true,
       data: parsed,
       googleSheetSync: forwardStatus,
+      telegramAlert: telegramAlertSent,
     });
   } catch (error) {
     logError('Error processing MacroDroid webhook', error);
