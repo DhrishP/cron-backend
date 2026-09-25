@@ -8,6 +8,15 @@ export function createApp(): Express {
 
   // Standard middleware
   app.use(cors());
+
+  // For macrodroid webhooks: capture raw body as text BEFORE express.json()
+  // MacroDroid sends SMS with literal newlines inside JSON strings which breaks JSON.parse
+  app.use(
+    ['/webhooks/macrodroid', '/api/webhooks/macrodroid'],
+    express.text({ type: '*/*' }),
+  );
+
+  // JSON parser for everything else
   app.use(express.json());
   app.use(express.urlencoded({ extended: true }));
 
