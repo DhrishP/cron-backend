@@ -64,6 +64,20 @@ macrodroidRouter.post('/', async (req: Request, res: Response) => {
       return;
     }
 
+    // Ignore notifications from our own bot or spend tracker alerts to prevent loops
+    const senderLower = sender.toLowerCase();
+    const smsLower = sms.toLowerCase();
+    if (
+      senderLower.includes('spendstracker') ||
+      smsLower.includes('transaction alert') ||
+      smsLower.includes('spend tracker connected') ||
+      smsLower.includes('monthly financial summary')
+    ) {
+      logInfo('Ignored own bot notification loop', { sender });
+      res.status(200).json({ success: true, ignored: true, reason: 'Own bot notification' });
+      return;
+    }
+
     // Filter: only process actual financial transactions
     if (!isLikelyTransaction(sms)) {
       logInfo('Filtered out (non-financial)', { sms: sms.substring(0, 80) });
@@ -90,7 +104,7 @@ macrodroidRouter.post('/', async (req: Request, res: Response) => {
 
     // Forward to Google Sheets — FLAT fields matching columns:
     // Date | Title | Type | Amount (₹) | Tag | Effective Monthly (₹) | Raw
-    const sheetWebhookUrl = process.env.GOOGLE_SHEET_WEBHOOK_URL;
+    const sheetWebhookUrl = (process.env.GOOGLE_SHEET_WEBHOOK_URL || '').replace(/['"]/g, '').trim();
     let forwardStatus = 'skipped';
     let loggedRow: number | undefined;
 

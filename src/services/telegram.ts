@@ -12,6 +12,10 @@ export function getCachedChatId(): string | number | null {
   return cachedChatId || process.env.TELEGRAM_CHAT_ID || null;
 }
 
+export function getSheetWebhookUrl(): string {
+  return (process.env.GOOGLE_SHEET_WEBHOOK_URL || '').replace(/['"]/g, '').trim();
+}
+
 export async function sendTelegramMessage(chatId: string | number, text: string, replyMarkup?: Record<string, unknown>): Promise<boolean> {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token) {
@@ -51,8 +55,8 @@ export interface MonthlySummaryData {
   transactionCount: number;
 }
 
-export async function sendMonthlySummaryAlert(summary: MonthlySummaryData): Promise<boolean> {
-  const chatId = getCachedChatId();
+export async function sendMonthlySummaryAlert(summary: MonthlySummaryData, targetChatId?: string | number): Promise<boolean> {
+  const chatId = targetChatId || getCachedChatId();
   if (!chatId) {
     logInfo('No Telegram chatId available for monthly summary');
     return false;
@@ -73,6 +77,50 @@ export async function sendMonthlySummaryAlert(summary: MonthlySummaryData): Prom
   return sendTelegramMessage(chatId, text);
 }
 
+export function getDefaultAlertKeyboard(row: number) {
+  return {
+    inline_keyboard: [
+      [
+        { text: '🗓 3 Months', callback_data: `tag:${row}:Amortized:3` },
+        { text: '🗓 6 Months', callback_data: `tag:${row}:Amortized:6` },
+        { text: '🗓 1 Year (12m)', callback_data: `tag:${row}:Amortized:12` },
+      ],
+      [
+        { text: '🔢 Pick 2–12 Months', callback_data: `picker:${row}` },
+        { text: '🚨 Emergency', callback_data: `tag:${row}:Emergency:0` },
+      ],
+    ],
+  };
+}
+
+export function getMonthPickerKeyboard(row: number) {
+  return {
+    inline_keyboard: [
+      [
+        { text: '2 mo', callback_data: `tag:${row}:Amortized:2` },
+        { text: '3 mo', callback_data: `tag:${row}:Amortized:3` },
+        { text: '4 mo', callback_data: `tag:${row}:Amortized:4` },
+        { text: '5 mo', callback_data: `tag:${row}:Amortized:5` },
+      ],
+      [
+        { text: '6 mo', callback_data: `tag:${row}:Amortized:6` },
+        { text: '7 mo', callback_data: `tag:${row}:Amortized:7` },
+        { text: '8 mo', callback_data: `tag:${row}:Amortized:8` },
+        { text: '9 mo', callback_data: `tag:${row}:Amortized:9` },
+      ],
+      [
+        { text: '10 mo', callback_data: `tag:${row}:Amortized:10` },
+        { text: '11 mo', callback_data: `tag:${row}:Amortized:11` },
+        { text: '12 mo', callback_data: `tag:${row}:Amortized:12` },
+      ],
+      [
+        { text: '⬅️ Back', callback_data: `back:${row}` },
+        { text: '🚨 Emergency', callback_data: `tag:${row}:Emergency:0` },
+      ],
+    ],
+  };
+}
+
 export async function sendTransactionAlert(
   parsed: ParsedTransaction,
   rowNumber?: number
@@ -89,27 +137,15 @@ export async function sendTransactionAlert(
     `📌 <b>${parsed.title}</b>\n` +
     `💰 <b>₹${parsed.amount.toLocaleString('en-IN')}</b> (${parsed.type})\n` +
     `━━━━━━━━━━━━━━━━━━\n` +
-    `<i>Logged as <b>Normal</b> by default. Tap only if this is a subscription or emergency:</i>`;
+    `<i>Logged as <b>Normal</b> by default. Split across multiple months:</i>`;
 
-  const inlineKeyboard = {
-    inline_keyboard: [
-      [
-        { text: '🗓 1-Year Sub (12mo)', callback_data: `tag:${row}:Yearly:12` },
-        { text: '📅 Quarterly (3mo)', callback_data: `tag:${row}:Quarterly:3` },
-      ],
-      [
-        { text: '🚨 Emergency', callback_data: `tag:${row}:Emergency:0` },
-      ],
-    ],
-  };
-
-  return sendTelegramMessage(chatId, text, inlineKeyboard);
+  return sendTelegramMessage(chatId, text, getDefaultAlertKeyboard(row));
 }
 
 export async function handleTelegramCallback(callbackQuery: {
   id: string;
   from: { id: number; first_name?: string };
-  message?: { message_id: number; chat: { id: number } };
+  message?: { message_id: number; chat: { id: number }; text?: string };
   data?: string;
 }): Promise<void> {
   const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -129,6 +165,36 @@ export async function handleTelegramCallback(callbackQuery: {
     body: JSON.stringify({ callback_query_id: callbackQuery.id }),
   });
 
+  // Handle switching to month picker grid (2 to 12 months)
+  if (data.startsWith('picker:') && messageId) {
+    const row = parseInt(data.split(':')[1], 10) || 0;
+    await fetch(`https://api.telegram.org/bot${token}/editMessageReplyMarkup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        message_id: messageId,
+        reply_markup: getMonthPickerKeyboard(row),
+      }),
+    });
+    return;
+  }
+
+  // Handle back button to default keyboard
+  if (data.startsWith('back:') && messageId) {
+    const row = parseInt(data.split(':')[1], 10) || 0;
+    await fetch(`https://api.telegram.org/bot${token}/editMessageReplyMarkup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        message_id: messageId,
+        reply_markup: getDefaultAlertKeyboard(row),
+      }),
+    });
+    return;
+  }
+
   // Expected callback data: "tag:<row>:<tagName>:<duration>"
   const parts = data.split(':');
   if (parts[0] !== 'tag' || parts.length < 4) {
@@ -142,8 +208,10 @@ export async function handleTelegramCallback(callbackQuery: {
   logInfo(`Telegram button pressed for Row ${row}: ${tagName} (${duration} mo)`);
 
   // Update Google Sheet via webhook if configured
-  const sheetWebhookUrl = process.env.GOOGLE_SHEET_WEBHOOK_URL;
+  const sheetWebhookUrl = getSheetWebhookUrl();
   let updateSuccess = false;
+  let createdFutureRows = 0;
+  let monthlyCost = 0;
 
   if (sheetWebhookUrl && row > 0) {
     try {
@@ -158,8 +226,14 @@ export async function handleTelegramCallback(callbackQuery: {
         }),
         redirect: 'follow',
       });
-      const resJson = await res.json() as { status?: string };
-      updateSuccess = resJson.status === 'updated';
+      const resJson = await res.json() as {
+        status?: string;
+        createdRows?: number;
+        monthlyCost?: number;
+      };
+      updateSuccess = resJson.status === 'success' || resJson.status === 'updated';
+      if (resJson.createdRows) createdFutureRows = resJson.createdRows;
+      if (resJson.monthlyCost) monthlyCost = resJson.monthlyCost;
     } catch (err) {
       logError('Failed to update Google Sheet row via Telegram callback', err);
     }
@@ -167,17 +241,36 @@ export async function handleTelegramCallback(callbackQuery: {
 
   // Edit original Telegram message to show confirmation
   if (messageId) {
-    let confirmationText = `✅ <b>Logged as: ${tagName}</b>`;
-    if (tagName === 'Yearly' || duration === 12) {
-      confirmationText += ` (Amortized over 12 months)`;
-    } else if (tagName === 'Quarterly' || duration === 3) {
-      confirmationText += ` (Amortized over 3 months)`;
-    } else if (tagName === 'Emergency') {
-      confirmationText += ` (Excluded from monthly baseline)`;
+    const origText = callbackQuery.message?.text || '';
+    let headerAndDetails = '';
+    if (origText.includes('━━━━━━━━━━━━━━━━━━')) {
+      const textParts = origText.split('━━━━━━━━━━━━━━━━━━');
+      if (textParts.length >= 2) {
+        const safeHeader = textParts[0].trim().replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        const safeDetails = textParts[1].trim().replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        headerAndDetails = `<b>${safeHeader}</b>\n━━━━━━━━━━━━━━━━━━\n${safeDetails}\n━━━━━━━━━━━━━━━━━━\n`;
+      }
     }
 
-    if (row > 0 && updateSuccess) {
-      confirmationText += `\n📊 Google Sheet Row ${row} updated!`;
+    let confirmationText = headerAndDetails;
+    if (duration > 1) {
+      const perMo = monthlyCost > 0 ? ` (₹${monthlyCost.toLocaleString('en-IN')}/mo)` : '';
+      confirmationText += `✅ <b>Amortized over ${duration} months${perMo}</b>`;
+      if (createdFutureRows > 0) {
+        confirmationText += `\n📊 Generated ${createdFutureRows} future monthly rows in Google Sheet!`;
+      } else if (row > 0 && updateSuccess) {
+        confirmationText += `\n📊 Google Sheet Row ${row} updated!`;
+      }
+    } else if (tagName === 'Emergency') {
+      confirmationText += `✅ <b>Tagged as: Emergency</b> (Excluded from monthly baseline)`;
+      if (row > 0 && updateSuccess) {
+        confirmationText += `\n📊 Google Sheet Row ${row} updated!`;
+      }
+    } else {
+      confirmationText += `✅ <b>Tagged as: ${tagName}</b>`;
+      if (row > 0 && updateSuccess) {
+        confirmationText += `\n📊 Google Sheet Row ${row} updated!`;
+      }
     }
 
     await fetch(`https://api.telegram.org/bot${token}/editMessageText`, {
@@ -214,7 +307,7 @@ export async function handleDirectTextMessage(chatId: string | number, text: str
 
   // 2. /summary command
   if (trimmed.startsWith('/summary') || trimmed.toLowerCase() === 'summary') {
-    const sheetWebhookUrl = process.env.GOOGLE_SHEET_WEBHOOK_URL;
+    const sheetWebhookUrl = getSheetWebhookUrl();
     const period = new Date().toLocaleString('default', { month: 'long', year: 'numeric' });
     let summaryData: MonthlySummaryData = {
       period,
@@ -247,7 +340,7 @@ export async function handleDirectTextMessage(chatId: string | number, text: str
       }
     }
 
-    await sendMonthlySummaryAlert(summaryData);
+    await sendMonthlySummaryAlert(summaryData, chatId);
     return;
   }
 
@@ -266,7 +359,7 @@ export async function handleDirectTextMessage(chatId: string | number, text: str
     }
 
     // Forward to Google Sheet
-    const sheetWebhookUrl = process.env.GOOGLE_SHEET_WEBHOOK_URL;
+    const sheetWebhookUrl = getSheetWebhookUrl();
     let loggedRow: number | undefined;
 
     if (sheetWebhookUrl) {
@@ -275,6 +368,13 @@ export async function handleDirectTextMessage(chatId: string | number, text: str
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
+            date: new Date().toLocaleDateString('en-IN'),
+            title: parsed.title,
+            type: parsed.type,
+            amount: parsed.amount,
+            tag: parsed.suggestedTag || 'Normal',
+            effectiveMonthly: parsed.effectiveMonthlyCost || parsed.amount,
+            raw: trimmed,
             sms: trimmed,
             sender: 'Telegram Direct',
             parsed,
@@ -295,21 +395,9 @@ export async function handleDirectTextMessage(chatId: string | number, text: str
       `✅ <b>Logged: ₹${parsed.amount.toLocaleString('en-IN')}</b>\n` +
       `━━━━━━━━━━━━━━━━━━\n` +
       `📌 <b>${parsed.title}</b> (${parsed.type})\n` +
-      `📊 <i>Logged as <b>Normal</b> by default. Tap below only if this is a recurring sub or emergency:</i>`;
+      `📊 <i>Logged as <b>Normal</b> by default. Split across multiple months:</i>`;
 
-    const inlineKeyboard = {
-      inline_keyboard: [
-        [
-          { text: '🗓 1-Year Sub (12mo)', callback_data: `tag:${row}:Yearly:12` },
-          { text: '📅 Quarterly (3mo)', callback_data: `tag:${row}:Quarterly:3` },
-        ],
-        [
-          { text: '🚨 Emergency', callback_data: `tag:${row}:Emergency:0` },
-        ],
-      ],
-    };
-
-    await sendTelegramMessage(chatId, confirmText, inlineKeyboard);
+    await sendTelegramMessage(chatId, confirmText, getDefaultAlertKeyboard(row));
   } catch (err) {
     logError('Error logging manual Telegram transaction', err);
     await sendTelegramMessage(chatId, `❌ Failed to log transaction: ${err instanceof Error ? err.message : 'Unknown error'}`);

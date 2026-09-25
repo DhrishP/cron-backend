@@ -30,7 +30,7 @@ financeCronRouter.all('/summary', async (_req: Request, res: Response) => {
     };
 
     // Query Google Sheets if configured
-    const sheetWebhookUrl = process.env.GOOGLE_SHEET_WEBHOOK_URL;
+    const sheetWebhookUrl = (process.env.GOOGLE_SHEET_WEBHOOK_URL || '').replace(/['"]/g, '').trim();
     if (sheetWebhookUrl) {
       try {
         const sheetRes = await fetch(sheetWebhookUrl, {
