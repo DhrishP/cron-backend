@@ -1,5 +1,6 @@
 import { ParsedTransaction } from '../types/index.js';
 import { logInfo, logError } from './logger.js';
+import { categorizeWithDeepInfra } from './deepinfra.js';
 
 let cachedChatId: string | number | null = process.env.TELEGRAM_CHAT_ID || null;
 
@@ -36,6 +37,40 @@ export async function sendTelegramMessage(chatId: string | number, text: string,
     logError('Failed to send Telegram message', err);
     return false;
   }
+}
+
+export interface MonthlySummaryData {
+  period: string;
+  totalDebited: number;
+  totalCredited: number;
+  effectiveMonthlyBurn: number;
+  normalSpends: number;
+  yearlyAmortized: number;
+  quarterlyAmortized: number;
+  emergencySpends: number;
+  transactionCount: number;
+}
+
+export async function sendMonthlySummaryAlert(summary: MonthlySummaryData): Promise<boolean> {
+  const chatId = getCachedChatId();
+  if (!chatId) {
+    logInfo('No Telegram chatId available for monthly summary');
+    return false;
+  }
+
+  const text =
+    `📊 <b>Monthly Financial Summary (${summary.period})</b>\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+    `💸 <b>Actual Bank Debited:</b> ₹${summary.totalDebited.toLocaleString('en-IN')}\n` +
+    `📉 <b>Effective Monthly Burn:</b> ₹${summary.effectiveMonthlyBurn.toLocaleString('en-IN')}\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+    `• <b>Regular Spends:</b> ₹${summary.normalSpends.toLocaleString('en-IN')}\n` +
+    `• <b>Subscriptions & Yearly:</b> ₹${(summary.yearlyAmortized + summary.quarterlyAmortized).toLocaleString('en-IN')}/mo\n` +
+    `• <b>Emergencies:</b> ₹${summary.emergencySpends.toLocaleString('en-IN')}\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+    `📝 <b>Total Transactions Logged:</b> ${summary.transactionCount}`;
+
+  return sendTelegramMessage(chatId, text);
 }
 
 export async function sendTransactionAlert(
@@ -157,3 +192,127 @@ export async function handleTelegramCallback(callbackQuery: {
     });
   }
 }
+
+export async function handleDirectTextMessage(chatId: string | number, text: string): Promise<void> {
+  const trimmed = text.trim();
+
+  // 1. /start command
+  if (trimmed.startsWith('/start')) {
+    await sendTelegramMessage(
+      chatId,
+      `👋 <b>Spend Tracker Connected!</b>\n\n` +
+      `<b>How to log spends:</b>\n` +
+      `1️⃣ <b>Automatic:</b> Any bank/UPI SMS sent via MacroDroid is auto-logged.\n` +
+      `2️⃣ <b>Direct text (Cash / Manual):</b> Just text me anytime, e.g.:\n` +
+      `• <code>500 cash petrol</code>\n` +
+      `• <code>3500 tank clean</code>\n` +
+      `• <code>12000 internet annual</code>\n\n` +
+      `📊 Send <b>/summary</b> to see your monthly spending breakdown!`
+    );
+    return;
+  }
+
+  // 2. /summary command
+  if (trimmed.startsWith('/summary') || trimmed.toLowerCase() === 'summary') {
+    const sheetWebhookUrl = process.env.GOOGLE_SHEET_WEBHOOK_URL;
+    const period = new Date().toLocaleString('default', { month: 'long', year: 'numeric' });
+    let summaryData: MonthlySummaryData = {
+      period,
+      totalDebited: 0,
+      totalCredited: 0,
+      effectiveMonthlyBurn: 0,
+      normalSpends: 0,
+      yearlyAmortized: 0,
+      quarterlyAmortized: 0,
+      emergencySpends: 0,
+      transactionCount: 0,
+    };
+
+    if (sheetWebhookUrl) {
+      try {
+        const sheetRes = await fetch(sheetWebhookUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'get_monthly_summary' }),
+          redirect: 'follow',
+        });
+        if (sheetRes.ok) {
+          const sheetJson = await sheetRes.json() as { summary?: Partial<MonthlySummaryData> };
+          if (sheetJson.summary) {
+            summaryData = { ...summaryData, ...sheetJson.summary, period };
+          }
+        }
+      } catch (err) {
+        logError('Error fetching summary for /summary command', err);
+      }
+    }
+
+    await sendMonthlySummaryAlert(summaryData);
+    return;
+  }
+
+  // 3. User sent a manual expense text (e.g. "500 cash chai" or "12000 wifi")
+  try {
+    const parsed = await categorizeWithDeepInfra(trimmed, 'Manual / Telegram');
+
+    if (parsed.amount <= 0) {
+      await sendTelegramMessage(
+        chatId,
+        `⚠️ Could not detect an amount. Please specify an amount, e.g.:\n` +
+        `• <code>500 cash for auto</code>\n` +
+        `• <code>3500 tank cleaning</code>`
+      );
+      return;
+    }
+
+    // Forward to Google Sheet
+    const sheetWebhookUrl = process.env.GOOGLE_SHEET_WEBHOOK_URL;
+    let loggedRow: number | undefined;
+
+    if (sheetWebhookUrl) {
+      try {
+        const forwardResponse = await fetch(sheetWebhookUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sms: trimmed,
+            sender: 'Telegram Direct',
+            parsed,
+          }),
+          redirect: 'follow',
+        });
+        if (forwardResponse.ok) {
+          const resData = await forwardResponse.json() as { row?: number };
+          loggedRow = resData.row;
+        }
+      } catch (fwdErr) {
+        logError('Failed to forward manual Telegram spend to Google Sheets', fwdErr);
+      }
+    }
+
+    const row = loggedRow || 0;
+    const confirmText =
+      `✅ <b>Logged: ₹${parsed.amount.toLocaleString('en-IN')}</b>\n` +
+      `━━━━━━━━━━━━━━━━━━\n` +
+      `📌 <b>${parsed.title}</b> (${parsed.type})\n` +
+      `📊 <i>Logged as <b>Normal</b> by default. Tap below only if this is a recurring sub or emergency:</i>`;
+
+    const inlineKeyboard = {
+      inline_keyboard: [
+        [
+          { text: '🗓 1-Year Sub (12mo)', callback_data: `tag:${row}:Yearly:12` },
+          { text: '📅 Quarterly (3mo)', callback_data: `tag:${row}:Quarterly:3` },
+        ],
+        [
+          { text: '🚨 Emergency', callback_data: `tag:${row}:Emergency:0` },
+        ],
+      ],
+    };
+
+    await sendTelegramMessage(chatId, confirmText, inlineKeyboard);
+  } catch (err) {
+    logError('Error logging manual Telegram transaction', err);
+    await sendTelegramMessage(chatId, `❌ Failed to log transaction: ${err instanceof Error ? err.message : 'Unknown error'}`);
+  }
+}
+

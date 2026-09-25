@@ -1,12 +1,13 @@
 import { Router, Request, Response } from 'express';
-import { logCronExecution, logInfo } from '../../services/logger.js';
+import { logCronExecution, logInfo, logError } from '../../services/logger.js';
+import { sendMonthlySummaryAlert, MonthlySummaryData } from '../../services/telegram.js';
 import { CronJobResponse } from '../../types/index.js';
 
 export const financeCronRouter = Router();
 
 /**
- * Endpoint for cron-job.org to trigger regular financial review / calculations
- * e.g., GET /api/cron/finance/summary or POST /api/cron/finance/summary
+ * Endpoint for cron-job.org to trigger monthly financial summary
+ * Calculates true burn rate and delivers a breakdown to Telegram
  */
 financeCronRouter.all('/summary', async (_req: Request, res: Response) => {
   const startTime = Date.now();
@@ -15,28 +16,59 @@ financeCronRouter.all('/summary', async (_req: Request, res: Response) => {
   try {
     logInfo(`Executing cron job: ${jobName}`);
 
-    // Example logic: In a full setup, this queries your Google Sheet or Database,
-    // aggregates monthly income, amortizes yearly subscriptions (e.g. ₹12k / 12),
-    // and filters out emergencies.
-    const mockSummary = {
-      period: new Date().toLocaleString('default', { month: 'long', year: 'numeric' }),
-      estimatedIncome: 0,
-      regularExpenses: 0,
-      amortizedSubscriptions: 0,
-      emergencyExpenses: 0,
-      netSavings: 0,
-      checkedAt: new Date().toISOString(),
+    const period = new Date().toLocaleString('default', { month: 'long', year: 'numeric' });
+    let summaryData: MonthlySummaryData = {
+      period,
+      totalDebited: 0,
+      totalCredited: 0,
+      effectiveMonthlyBurn: 0,
+      normalSpends: 0,
+      yearlyAmortized: 0,
+      quarterlyAmortized: 0,
+      emergencySpends: 0,
+      transactionCount: 0,
     };
 
+    // Query Google Sheets if configured
+    const sheetWebhookUrl = process.env.GOOGLE_SHEET_WEBHOOK_URL;
+    if (sheetWebhookUrl) {
+      try {
+        const sheetRes = await fetch(sheetWebhookUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'get_monthly_summary' }),
+          redirect: 'follow',
+        });
+        if (sheetRes.ok) {
+          const sheetJson = await sheetRes.json() as { status?: string; summary?: Partial<MonthlySummaryData> };
+          if (sheetJson.summary) {
+            summaryData = {
+              ...summaryData,
+              ...sheetJson.summary,
+              period,
+            };
+          }
+        }
+      } catch (sheetErr) {
+        logError('Error fetching monthly summary from Google Sheet', sheetErr);
+      }
+    }
+
+    // Send Telegram Notification
+    const telegramSent = await sendMonthlySummaryAlert(summaryData);
+
     const durationMs = Date.now() - startTime;
-    logCronExecution(jobName, durationMs, 'success', mockSummary);
+    logCronExecution(jobName, durationMs, 'success', { ...summaryData, telegramSent });
 
     const response: CronJobResponse = {
       success: true,
       jobName,
       timestamp: new Date().toISOString(),
       durationMs,
-      result: mockSummary,
+      result: {
+        ...summaryData,
+        telegramAlertDelivered: telegramSent,
+      },
     };
 
     res.status(200).json(response);
