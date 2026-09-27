@@ -47,6 +47,7 @@ export interface MonthlySummaryData {
   period: string;
   totalDebited: number;
   totalCredited: number;
+  netCashFlow?: number;
   effectiveMonthlyBurn: number;
   normalSpends: number;
   yearlyAmortized: number;
@@ -62,15 +63,21 @@ export async function sendMonthlySummaryAlert(summary: MonthlySummaryData, targe
     return false;
   }
 
+  const net = summary.netCashFlow !== undefined ? summary.netCashFlow : (summary.totalCredited - summary.totalDebited);
+  const netSign = net >= 0 ? '+' : '-';
+  const netLabel = net >= 0 ? 'Surplus / Inflow' : 'Net Outflow';
+
   const text =
     `📊 <b>Monthly Financial Summary (${summary.period})</b>\n` +
     `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-    `💸 <b>Actual Bank Debited:</b> ₹${summary.totalDebited.toLocaleString('en-IN')}\n` +
-    `📉 <b>Effective Monthly Burn:</b> ₹${summary.effectiveMonthlyBurn.toLocaleString('en-IN')}\n` +
+    `💸 <b>Given / Sent (Debited):</b> ₹${summary.totalDebited.toLocaleString('en-IN')}\n` +
+    `💰 <b>Taken / Received (Credited):</b> ₹${summary.totalCredited.toLocaleString('en-IN')}\n` +
+    `⚖️ <b>Net Cash Flow:</b> ${netSign}₹${Math.abs(net).toLocaleString('en-IN')} (<i>${netLabel}</i>)\n` +
     `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-    `• <b>Regular Spends:</b> ₹${summary.normalSpends.toLocaleString('en-IN')}\n` +
-    `• <b>Subscriptions & Yearly:</b> ₹${(summary.yearlyAmortized + summary.quarterlyAmortized).toLocaleString('en-IN')}/mo\n` +
-    `• <b>Emergencies:</b> ₹${summary.emergencySpends.toLocaleString('en-IN')}\n` +
+    `📉 <b>Effective Monthly Burn:</b> ₹${summary.effectiveMonthlyBurn.toLocaleString('en-IN')}\n` +
+    `  • <b>Regular Spends:</b> ₹${summary.normalSpends.toLocaleString('en-IN')}\n` +
+    `  • <b>Subscriptions & Yearly:</b> ₹${(summary.yearlyAmortized + summary.quarterlyAmortized).toLocaleString('en-IN')}/mo\n` +
+    `  • <b>Emergencies:</b> ₹${summary.emergencySpends.toLocaleString('en-IN')}\n` +
     `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
     `📝 <b>Total Transactions Logged:</b> ${summary.transactionCount}`;
 

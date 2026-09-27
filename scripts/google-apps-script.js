@@ -264,16 +264,19 @@ function getMonthlySummary(sheet) {
         } else {
           normalSpends += amount;
         }
+        effectiveMonthlyBurn += eff;
       }
-      effectiveMonthlyBurn += eff;
       count++;
     }
   }
+
+  var netCashFlow = totalCredited - totalDebited;
 
   return {
     period: now.toLocaleString('default', { month: 'long', year: 'numeric' }),
     totalDebited: totalDebited,
     totalCredited: totalCredited,
+    netCashFlow: netCashFlow,
     effectiveMonthlyBurn: effectiveMonthlyBurn,
     normalSpends: normalSpends,
     yearlyAmortized: amortizedSpends,

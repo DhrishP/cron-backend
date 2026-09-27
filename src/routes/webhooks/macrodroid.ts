@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { categorizeWithDeepInfra } from '../../services/deepinfra.js';
 import { sendTransactionAlert } from '../../services/telegram.js';
 import { logInfo, logError } from '../../services/logger.js';
+import { evaluateTransactionWithJev, recordRecentTransaction } from '../../services/jev.js';
 
 export const macrodroidRouter = Router();
 
@@ -78,10 +79,27 @@ macrodroidRouter.post('/', async (req: Request, res: Response) => {
       return;
     }
 
-    // Filter: only process actual financial transactions
+    // Quick keyword check before calling AI/Jev
     if (!isLikelyTransaction(sms)) {
-      logInfo('Filtered out (non-financial)', { sms: sms.substring(0, 80) });
+      logInfo('Filtered out (non-financial keyword check)', { sms: sms.substring(0, 80) });
       res.status(200).json({ success: true, ignored: true, reason: 'Not a financial transaction' });
+      return;
+    }
+
+    // Evaluate with TypeSafe Jev SystemOne:
+    // 1. Is this a real transaction vs loan/promotional/spam?
+    // 2. Is this a duplicate of a recent transaction (e.g. duplicate bank SMS)?
+    const jev = await evaluateTransactionWithJev(sms, sender);
+
+    if (!jev.isReal) {
+      logInfo('Filtered out by Jev (not a real transaction)', { sms: sms.substring(0, 80), reason: jev.reason });
+      res.status(200).json({ success: true, ignored: true, reason: 'Filtered by Jev: promotional or loan offer' });
+      return;
+    }
+
+    if (jev.isDuplicate) {
+      logInfo('Filtered out by Jev (duplicate transaction)', { sms: sms.substring(0, 80), reason: jev.reason });
+      res.status(200).json({ success: true, ignored: true, reason: 'Filtered by Jev: duplicate transaction' });
       return;
     }
 
@@ -101,6 +119,9 @@ macrodroidRouter.post('/', async (req: Request, res: Response) => {
       amount: parsed.amount,
       tag: parsed.suggestedTag,
     });
+
+    // Record in recent history for subsequent duplicate detection
+    recordRecentTransaction(sms, parsed.title, parsed.amount, parsed.type);
 
     // Forward to Google Sheets — FLAT fields matching columns:
     // Date | Title | Type | Amount (₹) | Tag | Effective Monthly (₹) | Raw
@@ -143,6 +164,7 @@ macrodroidRouter.post('/', async (req: Request, res: Response) => {
     if (parsed.amount >= 1500) {
       telegramAlertSent = await sendTransactionAlert(parsed, loggedRow);
     }
+
 
     res.status(200).json({
       success: true,
