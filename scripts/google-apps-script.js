@@ -80,7 +80,13 @@ function doPost(e) {
         // 2. Generate exactly (duration - 1) future rows for months 2 to duration
         var futureRows = [];
         for (var m = 2; m <= duration; m++) {
-          var futureDate = new Date(origDate.getFullYear(), origDate.getMonth() + (m - 1), origDate.getDate());
+          var targetYear = origDate.getFullYear();
+          var targetMonth = origDate.getMonth() + (m - 1);
+          // Month overflow handling: clamp targetDay to max days in targetMonth (e.g. Jan 31 -> Feb 28, not March 3)
+          var daysInTargetMonth = new Date(targetYear, targetMonth + 1, 0).getDate();
+          var targetDay = Math.min(origDate.getDate(), daysInTargetMonth);
+          var futureDate = new Date(targetYear, targetMonth, targetDay);
+
           var formattedFutureDate = formatDate(futureDate);
           var futureTitle = baseTitle + ' (' + m + '/' + duration + ')';
           var futureType = 'Amortized';
@@ -252,6 +258,12 @@ function getMonthlySummary(sheet) {
       var amount = parseFloat(data[i][3]) || 0;
       var tag    = (data[i][4] || 'Normal').toString();
       var eff    = parseFloat(data[i][5]) || 0;
+
+      // Exclude Credit Card bill payments and self-transfers from Burn, Given, and Taken
+      if (type === 'Transfer' || tag === 'Transfer') {
+        count++;
+        continue;
+      }
 
       if (type === 'Credit') {
         totalCredited += amount;

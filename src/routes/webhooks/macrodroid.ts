@@ -106,6 +106,14 @@ macrodroidRouter.post('/', async (req: Request, res: Response) => {
     // Parse with AI + regex fallback
     const parsed = await categorizeWithDeepInfra(sms, sender);
 
+    // If Jev classified as credit card payment or self transfer, enforce Transfer type/tag
+    if (jev.isTransfer) {
+      parsed.type = 'Transfer';
+      parsed.suggestedTag = 'Transfer';
+      parsed.effectiveMonthlyCost = 0;
+      parsed.category = 'Credit Card / Self Transfer';
+    }
+
     // Skip if no valid amount
     if (parsed.amount <= 0) {
       logInfo('Filtered out (zero amount)', { sms: sms.substring(0, 80) });

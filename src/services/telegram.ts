@@ -16,6 +16,16 @@ export function getSheetWebhookUrl(): string {
   return (process.env.GOOGLE_SHEET_WEBHOOK_URL || '').replace(/['"]/g, '').trim();
 }
 
+export function escapeHtml(str: string): string {
+  if (!str) return '';
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 export async function sendTelegramMessage(chatId: string | number, text: string, replyMarkup?: Record<string, unknown>): Promise<boolean> {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token) {
@@ -35,7 +45,10 @@ export async function sendTelegramMessage(chatId: string | number, text: string,
       }),
     });
 
-    const data = (await response.json()) as { ok?: boolean };
+    const data = (await response.json()) as { ok?: boolean; description?: string };
+    if (!data.ok) {
+      logError('Telegram API returned error', data);
+    }
     return data.ok === true;
   } catch (err) {
     logError('Failed to send Telegram message', err);
@@ -139,10 +152,23 @@ export async function sendTransactionAlert(
   }
 
   const row = rowNumber || 0;
+  const safeTitle = escapeHtml(parsed.title);
+  const safeType = escapeHtml(parsed.type);
+
+  if (parsed.type === 'Transfer' || parsed.suggestedTag === 'Transfer') {
+    const text = `💳 <b>Credit Card / Self-Transfer (≥ ₹1,500)</b>\n` +
+      `━━━━━━━━━━━━━━━━━━\n` +
+      `📌 <b>${safeTitle}</b>\n` +
+      `💰 <b>₹${parsed.amount.toLocaleString('en-IN')}</b>\n` +
+      `━━━━━━━━━━━━━━━━━━\n` +
+      `ℹ️ <i>Logged as <b>Transfer</b>. Excluded from Monthly Burn & Net Cash Flow to prevent double-counting.</i>`;
+    return sendTelegramMessage(chatId, text);
+  }
+
   const text = `💸 <b>Transaction Alert (≥ ₹1,500)</b>\n` +
     `━━━━━━━━━━━━━━━━━━\n` +
-    `📌 <b>${parsed.title}</b>\n` +
-    `💰 <b>₹${parsed.amount.toLocaleString('en-IN')}</b> (${parsed.type})\n` +
+    `📌 <b>${safeTitle}</b>\n` +
+    `💰 <b>₹${parsed.amount.toLocaleString('en-IN')}</b> (${safeType})\n` +
     `━━━━━━━━━━━━━━━━━━\n` +
     `<i>Logged as <b>Normal</b> by default. Split across multiple months:</i>`;
 
@@ -399,16 +425,29 @@ export async function handleDirectTextMessage(chatId: string | number, text: str
     }
 
     const row = loggedRow || 0;
+    const safeTitle = escapeHtml(parsed.title);
+    const safeType = escapeHtml(parsed.type);
+
+    if (parsed.type === 'Transfer' || parsed.suggestedTag === 'Transfer') {
+      const confirmText =
+        `💳 <b>Logged Transfer: ₹${parsed.amount.toLocaleString('en-IN')}</b>\n` +
+        `━━━━━━━━━━━━━━━━━━\n` +
+        `📌 <b>${safeTitle}</b>\n` +
+        `ℹ️ <i>Excluded from Monthly Burn & Net Cash Flow.</i>`;
+      await sendTelegramMessage(chatId, confirmText);
+      return;
+    }
+
     const confirmText =
       `✅ <b>Logged: ₹${parsed.amount.toLocaleString('en-IN')}</b>\n` +
       `━━━━━━━━━━━━━━━━━━\n` +
-      `📌 <b>${parsed.title}</b> (${parsed.type})\n` +
+      `📌 <b>${safeTitle}</b> (${safeType})\n` +
       `📊 <i>Logged as <b>Normal</b> by default. Split across multiple months:</i>`;
 
     await sendTelegramMessage(chatId, confirmText, getDefaultAlertKeyboard(row));
   } catch (err) {
     logError('Error logging manual Telegram transaction', err);
-    await sendTelegramMessage(chatId, `❌ Failed to log transaction: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    await sendTelegramMessage(chatId, `❌ Failed to log transaction: ${escapeHtml(err instanceof Error ? err.message : 'Unknown error')}`);
   }
 }
 

@@ -35,22 +35,23 @@ Your task is to extract transaction details into clean JSON.
 Tags:
 - "Yearly": For annual subscriptions, once-a-year expenses (e.g. 1-year internet, annual tank cleaning, yearly insurance).
 - "Emergency": For sudden unexpected emergency expenses (hospital, urgent repair).
+- "Transfer": For credit card bill payments (paying credit card dues, payment received towards credit card), transfers between own accounts, or self-fund transfers.
 - "Normal": For standard day-to-day spending.
 
 Calculate effectiveMonthlyCost:
 - If tag is "Yearly": amount / 12
-- If tag is "Emergency": 0
+- If tag is "Emergency" or "Transfer": 0
 - Otherwise: amount
 
 Return ONLY a valid JSON object matching this schema:
 {
-  "title": "Clean Merchant Name (e.g. ACT Fibernet, Swiggy, Water Tank Cleaning)",
-  "category": "Category Name (e.g. Utilities, Food, Household, Health)",
+  "title": "Clean Merchant Name (e.g. ACT Fibernet, Swiggy, HDFC Credit Card)",
+  "category": "Category Name (e.g. Utilities, Food, Household, Health, Transfers)",
   "amount": 12000,
-  "type": "Debit" | "Credit" | "ATM / Cash",
+  "type": "Debit" | "Credit" | "ATM / Cash" | "Transfer",
   "merchant": "Merchant name",
   "account": "e.g. A/c XX4321",
-  "tag": "Normal" | "Yearly" | "Emergency",
+  "tag": "Normal" | "Yearly" | "Emergency" | "Transfer",
   "effectiveMonthlyCost": 1000,
   "notes": "Brief explanation"
 }`;
@@ -98,6 +99,7 @@ Return ONLY a valid JSON object matching this schema:
     });
 
     let amount = typeof parsedAi.amount === 'number' && parsedAi.amount > 0 ? parsedAi.amount : 0;
+
     // Ground-truth fallback: If AI didn't catch amount but regex did, use regex amount!
     if (amount <= 0 && regexFallback.amount > 0) {
       amount = regexFallback.amount;
@@ -115,7 +117,9 @@ Return ONLY a valid JSON object matching this schema:
 
     // Verify / compute effectiveMonthlyCost safely
     let effectiveMonthlyCost = amount;
-    if (tag === 'Yearly') {
+    if (tag === 'Transfer' || type === 'Transfer') {
+      effectiveMonthlyCost = 0;
+    } else if (tag === 'Yearly') {
       effectiveMonthlyCost = Math.round((amount / 12) * 100) / 100;
     } else if (tag === 'Emergency') {
       effectiveMonthlyCost = 0;

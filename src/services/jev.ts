@@ -11,6 +11,7 @@ export interface RecentTransactionItem {
 export interface JevEvaluationResult {
   isReal: boolean;
   isDuplicate: boolean;
+  isTransfer: boolean;
   reason: string;
   confidence: number;
 }
@@ -59,7 +60,7 @@ export async function evaluateTransactionWithJev(
   // If circuit breaker is open (e.g. rate limit), fail open to allow transaction
   if (now < circuitOpenUntil) {
     logInfo('Jev circuit breaker is open, bypassing Jev evaluation');
-    return { isReal: true, isDuplicate: false, reason: 'circuit_open_bypass', confidence: 1 };
+    return { isReal: true, isDuplicate: false, isTransfer: false, reason: 'circuit_open_bypass', confidence: 1 };
   }
 
   const recents = getRecentTransactions();
@@ -72,6 +73,15 @@ export async function evaluateTransactionWithJev(
       criteria: {
         yes: 'An actual completed transaction where money has already moved from/to an account/card/wallet (e.g. debited, paid, spent, credited, received, refunded).',
         no: 'A promotional offer, loan advertisement, pre-approved loan/credit, marketing message, credit limit upgrade offer, or spam.',
+      },
+    },
+    is_transfer: {
+      type: 'choice',
+      instructions:
+        'Is this transaction a credit card bill payment (e.g. payment received for credit card bill, paying credit card dues) or an internal transfer between the user\'s own bank accounts (self-transfer)? Or is it a regular merchant purchase, bill, friend transfer, external salary, or everyday spend?',
+      criteria: {
+        yes: 'Credit card bill payment (e.g. payment towards credit card dues, payment received for credit card bill) or internal transfer between user\'s own accounts.',
+        no: 'A regular purchase, merchant payment, friend transfer, external salary, or everyday spend.',
       },
     },
   };
@@ -127,18 +137,19 @@ export async function evaluateTransactionWithJev(
     if (res.status === 429 || res.status === 529 || res.status === 503) {
       circuitOpenUntil = Date.now() + 30_000; // Trip circuit for 30s
       logError(`Jev API returned HTTP ${res.status}, tripping circuit for 30s`);
-      return { isReal: true, isDuplicate: false, reason: 'rate_limited_bypass', confidence: 0 };
+      return { isReal: true, isDuplicate: false, isTransfer: false, reason: 'rate_limited_bypass', confidence: 0 };
     }
 
     if (!res.ok) {
       logError(`Jev API returned HTTP ${res.status}`);
-      return { isReal: true, isDuplicate: false, reason: 'error_bypass', confidence: 0 };
+      return { isReal: true, isDuplicate: false, isTransfer: false, reason: 'error_bypass', confidence: 0 };
     }
 
     const data = (await res.json()) as {
       answers?: {
         is_real_transaction?: { choice?: string; confidence?: number };
         is_duplicate?: { choice?: string; confidence?: number };
+        is_transfer?: { choice?: string; confidence?: number };
       };
     };
 
@@ -153,6 +164,7 @@ export async function evaluateTransactionWithJev(
       return {
         isReal: false,
         isDuplicate: false,
+        isTransfer: false,
         reason: 'not_real_transaction',
         confidence: isRealConfidence,
       };
@@ -169,20 +181,33 @@ export async function evaluateTransactionWithJev(
       return {
         isReal: true,
         isDuplicate: true,
+        isTransfer: false,
         reason: 'duplicate_transaction',
         confidence: isDuplicateConfidence,
       };
     }
 
+    const isTransferChoice = data.answers?.is_transfer?.choice === 'yes';
+    const isTransferConfidence = data.answers?.is_transfer?.confidence ?? 0;
+    const isTransfer = isTransferChoice && isTransferConfidence >= 0.7;
+
+    if (isTransfer) {
+      logInfo('Jev identified credit card bill payment / self-transfer', {
+        choice: data.answers?.is_transfer?.choice,
+        confidence: isTransferConfidence,
+      });
+    }
+
     return {
       isReal: true,
       isDuplicate: false,
-      reason: 'confirmed_new_transaction',
+      isTransfer,
+      reason: isTransfer ? 'credit_card_or_self_transfer' : 'confirmed_new_transaction',
       confidence: isRealConfidence,
     };
   } catch (err) {
     clearTimeout(timeoutId);
     logError('Error evaluating transaction with Jev, failing open', err);
-    return { isReal: true, isDuplicate: false, reason: 'exception_bypass', confidence: 0 };
+    return { isReal: true, isDuplicate: false, isTransfer: false, reason: 'exception_bypass', confidence: 0 };
   }
 }

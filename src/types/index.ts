@@ -1,6 +1,6 @@
-export type TransactionType = 'Debit' | 'Credit' | 'ATM / Cash';
+export type TransactionType = 'Debit' | 'Credit' | 'ATM / Cash' | 'Transfer';
 
-export type ExpenseTag = 'Normal' | 'Yearly' | 'Emergency';
+export type ExpenseTag = 'Normal' | 'Yearly' | 'Emergency' | 'Transfer';
 
 export interface ParsedTransaction {
   title: string;

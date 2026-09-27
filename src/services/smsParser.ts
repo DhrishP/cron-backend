@@ -35,7 +35,11 @@ export function parseBankSms(rawSms: string, rawSender = ''): ParsedTransaction 
 
   // 2. Detect Transaction Type
   let type: TransactionType = 'Debit';
-  if (/credited|credit|received|refund|deposited|cashback/i.test(sms)) {
+  const isCcOrTransfer = /(?:credit card|card payment|towards credit card|towards card|bill payment|own a\/c|self transfer|transfer to self|transferred to own)/i.test(sms);
+
+  if (isCcOrTransfer) {
+    type = 'Transfer';
+  } else if (/credited|credit|received|refund|deposited|cashback/i.test(sms)) {
     type = 'Credit';
   } else if (/ATM|cash wdl|cash withdrawal|withdrawn at/i.test(sms)) {
     type = 'ATM / Cash';
@@ -43,7 +47,9 @@ export function parseBankSms(rawSms: string, rawSender = ''): ParsedTransaction 
 
   // 3. Extract Merchant / Recipient
   let merchant = sender || 'Unknown Merchant';
-  if (type === 'ATM / Cash') {
+  if (type === 'Transfer') {
+    merchant = 'Credit Card / Self Transfer';
+  } else if (type === 'ATM / Cash') {
     merchant = 'ATM Cash Withdrawal';
   } else {
     const merchantMatch = sms.match(/(?:to|at|vpa|info|towards|for)\s+([A-Za-z0-9\.\-_&@ ]{2,35}?)(?:\s+(?:on|ref|upi|avl|bal|using|via|annual|subscription|\.|$))/i) ||
@@ -71,7 +77,9 @@ export function parseBankSms(rawSms: string, rawSender = ''): ParsedTransaction 
 
   // 5. Intelligent Tagging
   let suggestedTag: ExpenseTag = 'Normal';
-  if (/annual|yearly|1-year|subscription|tank|broadband|act|fibernet/i.test(sms) || /annual|yearly|tank/i.test(merchant)) {
+  if (type === 'Transfer') {
+    suggestedTag = 'Transfer';
+  } else if (/annual|yearly|1-year|subscription|tank|broadband|act|fibernet/i.test(sms) || /annual|yearly|tank/i.test(merchant)) {
     suggestedTag = 'Yearly';
   } else if (/hospital|clinic|emergency|pharma|repair|plumber/i.test(sms)) {
     suggestedTag = 'Emergency';
@@ -79,7 +87,9 @@ export function parseBankSms(rawSms: string, rawSender = ''): ParsedTransaction 
 
   // 6. Calculate Effective Monthly Cost
   let effectiveMonthlyCost = amount;
-  if (suggestedTag === 'Yearly') {
+  if (suggestedTag === 'Transfer') {
+    effectiveMonthlyCost = 0; // Excluded from monthly recurring baseline
+  } else if (suggestedTag === 'Yearly') {
     effectiveMonthlyCost = Math.round((amount / 12) * 100) / 100;
   } else if (suggestedTag === 'Emergency') {
     effectiveMonthlyCost = 0; // Excluded from monthly recurring baseline
@@ -87,7 +97,8 @@ export function parseBankSms(rawSms: string, rawSender = ''): ParsedTransaction 
 
   // 7. Fallback category determination
   let category = 'General Expense';
-  if (type === 'ATM / Cash') category = 'Cash & ATM';
+  if (type === 'Transfer') category = 'Credit Card / Self Transfer';
+  else if (type === 'ATM / Cash') category = 'Cash & ATM';
   else if (suggestedTag === 'Yearly') category = 'Yearly Expenses';
   else if (suggestedTag === 'Emergency') category = 'Emergency';
   else if (type === 'Credit') category = 'Income / Refund';
