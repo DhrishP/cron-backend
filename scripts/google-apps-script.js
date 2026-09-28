@@ -19,7 +19,33 @@ function doPost(e) {
     var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
     var data = JSON.parse(e.postData.contents);
 
-    // 1. Handle monthly summary request
+    // 1. Handle fetching recent transactions for deduplication
+    if (data.action === 'get_recent') {
+      var limit = parseInt(data.limit, 10) || 5;
+      var lastRow = sheet.getLastRow();
+      var startRow = Math.max(2, lastRow - limit + 1);
+      var count = lastRow - startRow + 1;
+      var recent = [];
+      if (count > 0 && lastRow >= 2) {
+        var rows = sheet.getRange(startRow, 1, count, 7).getValues();
+        for (var i = rows.length - 1; i >= 0; i--) {
+          recent.push({
+            date: rows[i][0],
+            title: (rows[i][1] || '').toString(),
+            type: (rows[i][2] || '').toString(),
+            amount: parseFloat(rows[i][3]) || 0,
+            tag: (rows[i][4] || '').toString(),
+            effective: parseFloat(rows[i][5]) || 0,
+            raw: (rows[i][6] || '').toString()
+          });
+        }
+      }
+      return ContentService
+        .createTextOutput(JSON.stringify({ status: 'success', transactions: recent }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+
+    // 2. Handle monthly summary request
     if (data.action === 'get_monthly_summary') {
       return ContentService
         .createTextOutput(JSON.stringify({ status: 'success', summary: getMonthlySummary(sheet) }))

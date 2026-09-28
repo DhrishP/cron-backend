@@ -47,6 +47,59 @@ export function getRecentTransactions(): RecentTransactionItem[] {
   return recentTransactions.filter(t => now - t.timestamp <= DEDUPLICATION_WINDOW_MS);
 }
 
+interface SheetRecentTransaction {
+  date?: string;
+  title?: string;
+  type?: string;
+  amount?: number;
+  tag?: string;
+  effective?: number;
+  raw?: string;
+}
+
+export async function fetchRecentTransactionsFromSheet(limit = 5): Promise<RecentTransactionItem[]> {
+  const sheetWebhookUrl = (process.env.GOOGLE_SHEET_WEBHOOK_URL || '').replace(/['"]/g, '').trim();
+  if (!sheetWebhookUrl) {
+    return [];
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 2500); // 2.5s timeout
+
+  try {
+    const res = await fetch(sheetWebhookUrl, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action: 'get_recent', limit }),
+      redirect: 'follow',
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!res.ok) {
+      logError('Failed to fetch recent transactions from sheet', { status: res.status });
+      return [];
+    }
+
+    const data = (await res.json()) as { status?: string; transactions?: SheetRecentTransaction[] };
+    if (data.status === 'success' && Array.isArray(data.transactions)) {
+      return data.transactions.map(t => ({
+        sms: t.raw || t.title || '',
+        title: t.title || 'Unknown',
+        amount: typeof t.amount === 'number' ? t.amount : 0,
+        type: t.type || 'Debit',
+        timestamp: Date.now(),
+      }));
+    }
+    return [];
+  } catch (err) {
+    clearTimeout(timeoutId);
+    logError('Error fetching recent transactions from sheet (falling back to memory)', err);
+    return [];
+  }
+}
+
 export async function evaluateTransactionWithJev(
   sms: string,
   sender: string
@@ -63,7 +116,23 @@ export async function evaluateTransactionWithJev(
     return { isReal: true, isDuplicate: false, isTransfer: false, reason: 'circuit_open_bypass', confidence: 1 };
   }
 
-  const recents = getRecentTransactions();
+  // 1. Fetch persistent recent transactions from Google Sheet
+  const sheetRecents = await fetchRecentTransactionsFromSheet(5);
+
+  // 2. Merge with any in-memory transactions
+  const inMemoryRecents = getRecentTransactions();
+  const seen = new Set<string>();
+  const combinedRecents: RecentTransactionItem[] = [];
+
+  for (const item of [...inMemoryRecents, ...sheetRecents]) {
+    const key = `${item.amount}:${item.title}:${item.sms.slice(0, 50)}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      combinedRecents.push(item);
+    }
+  }
+
+  const recents = combinedRecents.slice(0, 5);
 
   const questions: Record<string, unknown> = {
     is_real_transaction: {
