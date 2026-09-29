@@ -178,6 +178,15 @@ function doPost(e) {
         .setMimeType(ContentService.MimeType.JSON);
     }
 
+    // 6. Handle subscription renewals inquiry
+    if (data.action === 'get_renewals' || data.action === 'get_subscriptions') {
+      var daysAhead = parseInt(data.days, 10) || 45;
+      var renewals = getSubscriptionRenewals(sheet, daysAhead);
+      return ContentService
+        .createTextOutput(JSON.stringify({ status: 'success', renewals: renewals }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+
     // SAFETY GUARD: If ANY other action is present, NEVER fall through to row logging!
     if (data.action) {
       return ContentService
@@ -379,6 +388,22 @@ function doGet(e) {
       .setMimeType(ContentService.MimeType.JSON);
   }
 
+  // Safe read-only query for subscription renewals
+  if (e && e.parameter && (e.parameter.action === 'get_renewals' || e.parameter.action === 'get_subscriptions')) {
+    var daysAhead = parseInt(e.parameter.days, 10) || 45;
+    var renewals = getSubscriptionRenewals(sheet, daysAhead);
+    return ContentService
+      .createTextOutput(JSON.stringify({ status: 'success', renewals: renewals }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+
+  // Safe read-only query for monthly summary
+  if (e && e.parameter && e.parameter.action === 'get_monthly_summary') {
+    return ContentService
+      .createTextOutput(JSON.stringify({ status: 'success', summary: getMonthlySummary(sheet) }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+
   try {
     sortSheetByDate(sheet);
   } catch (err) {}
@@ -551,6 +576,198 @@ function populateOldSubscriptions() {
   // Always keep sheet sorted chronologically by Date
   sortSheetByDate(sheet);
   Logger.log('Sheet sorted chronologically.');
+}
+
+/**
+ * Adds months to a date safely without day-of-month overflow.
+ * E.g., Jan 31 + 1 month = Feb 28, not Mar 3.
+ */
+function addMonths(baseDate, monthsToAdd) {
+  var d = new Date(baseDate.getTime());
+  var targetYear = d.getFullYear();
+  var targetMonth = d.getMonth() + monthsToAdd;
+  var daysInTargetMonth = new Date(targetYear, targetMonth + 1, 0).getDate();
+  var targetDay = Math.min(d.getDate(), daysInTargetMonth);
+  return new Date(targetYear, targetMonth, targetDay);
+}
+
+/**
+ * Scans sheet for all recurring/amortized subscriptions (3m, 6m, 12m)
+ * and calculates their exact expiry/renewal dates and days remaining.
+ *
+ * @param {Sheet} targetSheet Optional sheet reference
+ * @param {number} daysAhead Threshold in days to consider 'expiring soon' (default: 45)
+ * @returns {Array<Object>} List of subscriptions sorted by expiry date ascending
+ */
+function getSubscriptionRenewals(targetSheet, daysAhead) {
+  var sheet = targetSheet || SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  var data = sheet.getDataRange().getValues();
+  var thresholdDays = typeof daysAhead === 'number' ? daysAhead : 45;
+
+  var now = new Date();
+  var today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+  var subs = {};
+
+  for (var i = 1; i < data.length; i++) {
+    var rowDateVal = data[i][0];
+    var title = (data[i][1] || '').toString().trim();
+    var type = (data[i][2] || '').toString();
+    var amount = parseFloat(data[i][3]) || 0;
+    var tag = (data[i][4] || '').toString();
+    var eff = parseFloat(data[i][5]) || 0;
+
+    if (!title || amount <= 0) continue;
+
+    // Pattern 1: Amortized split like "Wifi Worldspace (6/6)" or "Internet Jio (1/3)"
+    var splitMatch = title.match(/^(.+?)\s*\((\d+)\/(\d+)\)$/);
+    if (splitMatch) {
+      var baseTitle = splitMatch[1].trim();
+      var part = parseInt(splitMatch[2], 10);
+      var totalParts = parseInt(splitMatch[3], 10);
+      var rowDate = parseDateValue(rowDateVal);
+
+      if (!subs[baseTitle]) {
+        subs[baseTitle] = {
+          title: baseTitle,
+          subType: 'split',
+          totalDuration: totalParts,
+          monthlyCost: eff || amount,
+          totalAmount: 0,
+          datesByPart: {},
+          firstPartSeen: part,
+          lastPartSeen: part,
+          minDate: rowDate,
+          maxDate: rowDate
+        };
+      }
+
+      var s = subs[baseTitle];
+      s.datesByPart[part] = rowDate;
+      s.totalAmount += amount;
+      if (eff > 0) s.monthlyCost = eff;
+
+      if (part < s.firstPartSeen) s.firstPartSeen = part;
+      if (part > s.lastPartSeen) s.lastPartSeen = part;
+      if (rowDate.getTime() < s.minDate.getTime()) s.minDate = rowDate;
+      if (rowDate.getTime() > s.maxDate.getTime()) s.maxDate = rowDate;
+      continue;
+    }
+
+    // Pattern 2: Monthly recurring like "GST Filing (Apr 2026)" or "YouTube Premium (Dec 2026)"
+    var recurringMatch = title.match(/^(.+?)\s*\(([A-Za-z]{3}\s+\d{4})\)$/);
+    if (recurringMatch) {
+      var recTitle = recurringMatch[1].trim();
+      var recDate = parseDateValue(rowDateVal);
+
+      if (!subs[recTitle]) {
+        subs[recTitle] = {
+          title: recTitle,
+          subType: 'recurring',
+          totalDuration: 12,
+          monthlyCost: eff || amount,
+          totalAmount: 0,
+          minDate: recDate,
+          maxDate: recDate,
+          monthCount: 0
+        };
+      }
+
+      var rSub = subs[recTitle];
+      rSub.totalAmount += amount;
+      rSub.monthCount += 1;
+      if (eff > 0) rSub.monthlyCost = eff;
+      if (recDate.getTime() < rSub.minDate.getTime()) rSub.minDate = recDate;
+      if (recDate.getTime() > rSub.maxDate.getTime()) rSub.maxDate = recDate;
+      continue;
+    }
+  }
+
+  var results = [];
+
+  for (var key in subs) {
+    var item = subs[key];
+    var startDate;
+    var renewalDate;
+
+    if (item.subType === 'split') {
+      var totalMonths = item.totalDuration || 1;
+      if (item.datesByPart[1]) {
+        startDate = item.datesByPart[1];
+        renewalDate = addMonths(startDate, totalMonths);
+      } else {
+        // Derive from known part
+        var anyPart = item.lastPartSeen;
+        var anyDate = item.datesByPart[anyPart];
+        startDate = addMonths(anyDate, -(anyPart - 1));
+        renewalDate = addMonths(anyDate, totalMonths - anyPart + 1);
+      }
+    } else {
+      // Recurring: renewal is 1 month after the latest logged month
+      startDate = item.minDate;
+      renewalDate = addMonths(item.maxDate, 1);
+    }
+
+    var expiryPure = new Date(renewalDate.getFullYear(), renewalDate.getMonth(), renewalDate.getDate());
+    var diffTime = expiryPure.getTime() - today.getTime();
+    var diffDays = Math.round(diffTime / (1000 * 60 * 60 * 24));
+
+    var isOverdue = diffDays < 0;
+    var isExpiringSoon = diffDays >= 0 && diffDays <= thresholdDays;
+
+    var status = 'active';
+    if (isOverdue) {
+      status = 'overdue';
+    } else if (diffDays === 0) {
+      status = 'today';
+    } else if (diffDays <= 7) {
+      status = 'week';
+    } else if (diffDays <= thresholdDays) {
+      status = 'soon';
+    }
+
+    var durationLabel = item.totalDuration + ' months';
+    if (item.totalDuration === 12) durationLabel = '1 Year (12m)';
+    else if (item.totalDuration === 6) durationLabel = '6 Months';
+    else if (item.totalDuration === 3) durationLabel = '3 Months';
+
+    results.push({
+      title: item.title,
+      duration: item.totalDuration,
+      durationLabel: durationLabel,
+      monthlyCost: Math.round(item.monthlyCost * 100) / 100,
+      totalAmount: Math.round(item.totalAmount * 100) / 100,
+      startDate: formatDate(startDate),
+      expiryDate: formatDate(renewalDate),
+      expiryTimestamp: expiryPure.getTime(),
+      daysRemaining: diffDays,
+      isOverdue: isOverdue,
+      isExpiringSoon: isExpiringSoon,
+      status: status
+    });
+  }
+
+  // Sort chronologically by expiry date (earliest renewals first)
+  results.sort(function(a, b) {
+    return a.expiryTimestamp - b.expiryTimestamp;
+  });
+
+  return results;
+}
+
+/**
+ * Diagnostic runner for renewals to inspect in Apps Script execution log:
+ * Select 'testRenewals' from dropdown -> click '▷ Run'.
+ */
+function testRenewals() {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  var renewals = getSubscriptionRenewals(sheet, 60);
+  Logger.log('Found ' + renewals.length + ' active subscriptions:');
+  for (var i = 0; i < renewals.length; i++) {
+    var r = renewals[i];
+    Logger.log('[' + r.status.toUpperCase() + '] ' + r.title + ' (' + r.durationLabel + ') | Renewal: ' + r.expiryDate + ' (' + r.daysRemaining + ' days remaining) | Total: ₹' + r.totalAmount);
+  }
+  return renewals;
 }
 
 

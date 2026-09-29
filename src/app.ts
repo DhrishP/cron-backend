@@ -26,7 +26,8 @@ export function createApp(): Express {
       message: 'Cron Backend Router is active',
       endpoints: {
         health: '/api/health',
-        cronFinance: '/api/cron/finance/summary',
+        cronFinanceSummary: '/api/cron/finance/summary',
+        cronFinanceRenewals: '/api/cron/finance/renewals',
         cronExample: '/api/cron/example/task',
         macroDroidWebhook: '/api/webhooks/macrodroid',
       },

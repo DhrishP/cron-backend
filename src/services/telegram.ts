@@ -97,6 +97,154 @@ export async function sendMonthlySummaryAlert(summary: MonthlySummaryData, targe
   return sendTelegramMessage(chatId, text);
 }
 
+export interface SubscriptionRenewalItem {
+  title: string;
+  duration: number;
+  durationLabel: string;
+  monthlyCost: number;
+  totalAmount: number;
+  startDate: string;
+  expiryDate: string;
+  expiryTimestamp: number;
+  daysRemaining: number;
+  isOverdue: boolean;
+  isExpiringSoon: boolean;
+  status: 'overdue' | 'today' | 'week' | 'soon' | 'active';
+}
+
+export async function fetchSubscriptionRenewals(daysAhead = 45): Promise<SubscriptionRenewalItem[]> {
+  const sheetWebhookUrl = getSheetWebhookUrl();
+  if (!sheetWebhookUrl) {
+    return [];
+  }
+
+  // 1. First try GET (read-only, fast)
+  try {
+    const getUrl = `${sheetWebhookUrl}${sheetWebhookUrl.includes('?') ? '&' : '?'}action=get_renewals&days=${daysAhead}`;
+    const res = await fetch(getUrl, {
+      method: 'GET',
+      redirect: 'follow',
+    });
+    if (res.ok) {
+      const data = (await res.json()) as { status?: string; renewals?: SubscriptionRenewalItem[] };
+      if (data.status === 'success' && Array.isArray(data.renewals)) {
+        return data.renewals;
+      }
+    }
+  } catch (err) {
+    logError('Error fetching renewals via GET, falling back to POST', err);
+  }
+
+  // 2. Fallback to POST
+  try {
+    const res = await fetch(sheetWebhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action: 'get_renewals', days: daysAhead }),
+      redirect: 'follow',
+    });
+    if (res.ok) {
+      const data = (await res.json()) as { status?: string; renewals?: SubscriptionRenewalItem[] };
+      if (data.status === 'success' && Array.isArray(data.renewals)) {
+        return data.renewals;
+      }
+    }
+  } catch (err) {
+    logError('Error fetching renewals via POST', err);
+  }
+
+  return [];
+}
+
+export async function sendRenewalAlert(renewals: SubscriptionRenewalItem[], targetChatId?: string | number): Promise<boolean> {
+  const chatId = targetChatId || getCachedChatId();
+  if (!chatId) {
+    logInfo('No Telegram chatId available for renewal alert');
+    return false;
+  }
+
+  if (renewals.length === 0) {
+    return false;
+  }
+
+  let text = `🔔 <b>Subscription Renewal Alert</b>\n`;
+  text += `━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+  text += `The following subscription(s) are ending soon and need renewal:\n\n`;
+
+  for (const item of renewals) {
+    let statusBadge = '🟡';
+    let timeText = `in <b>${item.daysRemaining} days</b>`;
+    if (item.isOverdue) {
+      statusBadge = '🔴';
+      timeText = `<b>OVERDUE by ${Math.abs(item.daysRemaining)} days</b>`;
+    } else if (item.daysRemaining === 0) {
+      statusBadge = '🚨';
+      timeText = `<b>EXPIRES TODAY!</b>`;
+    } else if (item.daysRemaining <= 7) {
+      statusBadge = '⚠️';
+      timeText = `in <b>${item.daysRemaining} days</b> (<i>This week!</i>)`;
+    }
+
+    text += `${statusBadge} <b>${escapeHtml(item.title)}</b> (${escapeHtml(item.durationLabel)})\n`;
+    text += `  • 📅 <b>Renewal Due:</b> ${item.expiryDate} (${timeText})\n`;
+    text += `  • 💰 <b>Est. Renewal Cost:</b> ₹${item.totalAmount.toLocaleString('en-IN')} (₹${item.monthlyCost.toLocaleString('en-IN')}/mo)\n\n`;
+  }
+
+  text += `━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+  text += `💡 <i>Send /renewals to inspect all tracked subscriptions.</i>`;
+
+  return sendTelegramMessage(chatId, text);
+}
+
+export async function sendAllSubscriptionsList(renewals: SubscriptionRenewalItem[], targetChatId?: string | number): Promise<boolean> {
+  const chatId = targetChatId || getCachedChatId();
+  if (!chatId) {
+    logInfo('No Telegram chatId available for subscriptions list');
+    return false;
+  }
+
+  if (renewals.length === 0) {
+    return sendTelegramMessage(
+      chatId,
+      `📋 <b>Tracked Subscriptions</b>\n\nNo recurring or split subscriptions found in your sheet.\n\n` +
+      `💡 <i>Tip: Amortized expenses (3m, 6m, 12m) are automatically tracked here!</i>`
+    );
+  }
+
+  const expiringSoon = renewals.filter(r => r.isExpiringSoon || r.isOverdue);
+  const futureSubs = renewals.filter(r => !r.isExpiringSoon && !r.isOverdue);
+  const totalMonthlyCommit = renewals.reduce((sum, r) => sum + r.monthlyCost, 0);
+
+  let text = `📋 <b>Tracked Subscriptions & Renewals</b>\n`;
+  text += `━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+
+  if (expiringSoon.length > 0) {
+    text += `🚨 <b>Due for Renewal Soon:</b>\n`;
+    for (const r of expiringSoon) {
+      const badge = r.isOverdue ? '🔴 [OVERDUE]' : (r.daysRemaining <= 7 ? '⚠️ [THIS WEEK]' : '🟡 [SOON]');
+      text += `• <b>${escapeHtml(r.title)}</b> (${escapeHtml(r.durationLabel)})\n`;
+      text += `  📅 <b>${r.expiryDate}</b> (${r.daysRemaining >= 0 ? `${r.daysRemaining}d left` : `${Math.abs(r.daysRemaining)}d ago`}) ${badge}\n`;
+      text += `  💰 ₹${r.totalAmount.toLocaleString('en-IN')} (₹${r.monthlyCost.toLocaleString('en-IN')}/mo)\n\n`;
+    }
+    text += `━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+  }
+
+  if (futureSubs.length > 0) {
+    text += `🗓 <b>Active Subscriptions:</b>\n`;
+    for (const r of futureSubs) {
+      text += `• <b>${escapeHtml(r.title)}</b> (${escapeHtml(r.durationLabel)})\n`;
+      text += `  📅 Due: <b>${r.expiryDate}</b> (in ${r.daysRemaining} days)\n`;
+      text += `  💰 ₹${r.totalAmount.toLocaleString('en-IN')} (₹${r.monthlyCost.toLocaleString('en-IN')}/mo)\n\n`;
+    }
+    text += `━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+  }
+
+  text += `📊 <b>Total Subscriptions:</b> ${renewals.length}\n`;
+  text += `💸 <b>Total Monthly Baseline:</b> ₹${Math.round(totalMonthlyCommit).toLocaleString('en-IN')}/mo`;
+
+  return sendTelegramMessage(chatId, text);
+}
+
 export function getDefaultAlertKeyboard(row: number) {
   return {
     inline_keyboard: [
@@ -334,7 +482,9 @@ export async function handleDirectTextMessage(chatId: string | number, text: str
       `• <code>500 cash petrol</code>\n` +
       `• <code>3500 tank clean</code>\n` +
       `• <code>12000 internet annual</code>\n\n` +
-      `📊 Send <b>/summary</b> to see your monthly spending breakdown!`
+      `📊 <b>Commands:</b>\n` +
+      `• <b>/summary</b> - Monthly spending breakdown & burn rate\n` +
+      `• <b>/renewals</b> - Track 3m, 6m, and 12m subscription renewals`
     );
     return;
   }
@@ -375,6 +525,23 @@ export async function handleDirectTextMessage(chatId: string | number, text: str
     }
 
     await sendMonthlySummaryAlert(summaryData, chatId);
+    return;
+  }
+
+  // 3. /renewals or /subscriptions command
+  if (
+    trimmed.startsWith('/renewals') ||
+    trimmed.startsWith('/subscriptions') ||
+    trimmed.toLowerCase() === 'renewals' ||
+    trimmed.toLowerCase() === 'subscriptions'
+  ) {
+    // Optional days parameter, e.g. "/renewals 60"
+    const parts = trimmed.split(/\s+/);
+    const customDays = parts.length > 1 ? parseInt(parts[1], 10) : 45;
+    const daysAhead = isNaN(customDays) ? 45 : customDays;
+
+    const renewals = await fetchSubscriptionRenewals(daysAhead);
+    await sendAllSubscriptionsList(renewals, chatId);
     return;
   }
 
