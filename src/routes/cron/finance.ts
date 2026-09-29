@@ -3,6 +3,7 @@ import { logCronExecution, logInfo, logError } from '../../services/logger.js';
 import {
   sendMonthlySummaryAlert,
   MonthlySummaryData,
+  fetchMonthlySummaryFromSheet,
   fetchSubscriptionRenewals,
   sendRenewalAlert,
 } from '../../services/telegram.js';
@@ -22,7 +23,9 @@ financeCronRouter.all('/summary', async (_req: Request, res: Response) => {
     logInfo(`Executing cron job: ${jobName}`);
 
     const period = new Date().toLocaleString('default', { month: 'long', year: 'numeric' });
-    let summaryData: MonthlySummaryData = {
+    const fetched = await fetchMonthlySummaryFromSheet();
+
+    const summaryData: MonthlySummaryData = fetched || {
       period,
       totalDebited: 0,
       totalCredited: 0,
@@ -33,31 +36,6 @@ financeCronRouter.all('/summary', async (_req: Request, res: Response) => {
       emergencySpends: 0,
       transactionCount: 0,
     };
-
-    // Query Google Sheets if configured
-    const sheetWebhookUrl = (process.env.GOOGLE_SHEET_WEBHOOK_URL || '').replace(/['"]/g, '').trim();
-    if (sheetWebhookUrl) {
-      try {
-        const sheetRes = await fetch(sheetWebhookUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-          body: JSON.stringify({ action: 'get_monthly_summary' }),
-          redirect: 'follow',
-        });
-        if (sheetRes.ok) {
-          const sheetJson = await sheetRes.json() as { status?: string; summary?: Partial<MonthlySummaryData> };
-          if (sheetJson.summary) {
-            summaryData = {
-              ...summaryData,
-              ...sheetJson.summary,
-              period,
-            };
-          }
-        }
-      } catch (sheetErr) {
-        logError('Error fetching monthly summary from Google Sheet', sheetErr);
-      }
-    }
 
     // Send Telegram Notification
     const telegramSent = await sendMonthlySummaryAlert(summaryData);

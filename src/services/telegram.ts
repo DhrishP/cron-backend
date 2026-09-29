@@ -97,6 +97,48 @@ export async function sendMonthlySummaryAlert(summary: MonthlySummaryData, targe
   return sendTelegramMessage(chatId, text);
 }
 
+export async function fetchMonthlySummaryFromSheet(): Promise<MonthlySummaryData | null> {
+  const sheetWebhookUrl = getSheetWebhookUrl();
+  if (!sheetWebhookUrl) return null;
+
+  // 1. Try GET first (reliable with Google 302 redirects)
+  try {
+    const getUrl = `${sheetWebhookUrl}${sheetWebhookUrl.includes('?') ? '&' : '?'}action=get_monthly_summary`;
+    const res = await fetch(getUrl, {
+      method: 'GET',
+      redirect: 'follow',
+    });
+    if (res.ok) {
+      const data = (await res.json()) as { status?: string; summary?: Partial<MonthlySummaryData> };
+      if (data.status === 'success' && data.summary) {
+        return data.summary as MonthlySummaryData;
+      }
+    }
+  } catch (err) {
+    logError('Error fetching monthly summary via GET, falling back to POST', err);
+  }
+
+  // 2. Fallback to POST
+  try {
+    const res = await fetch(sheetWebhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action: 'get_monthly_summary' }),
+      redirect: 'follow',
+    });
+    if (res.ok) {
+      const data = (await res.json()) as { status?: string; summary?: Partial<MonthlySummaryData> };
+      if (data.status === 'success' && data.summary) {
+        return data.summary as MonthlySummaryData;
+      }
+    }
+  } catch (err) {
+    logError('Error fetching monthly summary via POST', err);
+  }
+
+  return null;
+}
+
 export interface SubscriptionRenewalItem {
   title: string;
   duration: number;
@@ -491,9 +533,10 @@ export async function handleDirectTextMessage(chatId: string | number, text: str
 
   // 2. /summary command
   if (trimmed.startsWith('/summary') || trimmed.toLowerCase() === 'summary') {
-    const sheetWebhookUrl = getSheetWebhookUrl();
     const period = new Date().toLocaleString('default', { month: 'long', year: 'numeric' });
-    let summaryData: MonthlySummaryData = {
+    const fetched = await fetchMonthlySummaryFromSheet();
+
+    const summaryData: MonthlySummaryData = fetched || {
       period,
       totalDebited: 0,
       totalCredited: 0,
@@ -504,25 +547,6 @@ export async function handleDirectTextMessage(chatId: string | number, text: str
       emergencySpends: 0,
       transactionCount: 0,
     };
-
-    if (sheetWebhookUrl) {
-      try {
-        const sheetRes = await fetch(sheetWebhookUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-          body: JSON.stringify({ action: 'get_monthly_summary' }),
-          redirect: 'follow',
-        });
-        if (sheetRes.ok) {
-          const sheetJson = await sheetRes.json() as { summary?: Partial<MonthlySummaryData> };
-          if (sheetJson.summary) {
-            summaryData = { ...summaryData, ...sheetJson.summary, period };
-          }
-        }
-      } catch (err) {
-        logError('Error fetching summary for /summary command', err);
-      }
-    }
 
     await sendMonthlySummaryAlert(summaryData, chatId);
     return;
