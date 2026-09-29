@@ -67,11 +67,10 @@ export async function fetchRecentTransactionsFromSheet(limit = 5): Promise<Recen
   const timeoutId = setTimeout(() => controller.abort(), 2500); // 2.5s timeout
 
   try {
-    const res = await fetch(sheetWebhookUrl, {
-      method: 'POST',
+    const getUrl = `${sheetWebhookUrl}${sheetWebhookUrl.includes('?') ? '&' : '?'}action=get_recent&limit=${limit}`;
+    const res = await fetch(getUrl, {
+      method: 'GET',
       signal: controller.signal,
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({ action: 'get_recent', limit }),
       redirect: 'follow',
     });
 

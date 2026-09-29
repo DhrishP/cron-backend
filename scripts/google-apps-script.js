@@ -52,7 +52,7 @@ function doPost(e) {
         .setMimeType(ContentService.MimeType.JSON);
     }
 
-    // 2. Handle dynamic amortization / split from Telegram callback
+    // 3. Handle dynamic amortization / split from Telegram callback
     if (data.action === 'update_tag') {
       var row = parseInt(data.row, 10);
       var duration = parseInt(data.duration, 10) || 1;
@@ -162,34 +162,52 @@ function doPost(e) {
       }
     }
 
-    // 3. Normal transaction logging
+    // 4. Handle cleaning up zombie 0 rows
+    if (data.action === 'clean_zombie_rows') {
+      var deleted = cleanZombieRows(sheet);
+      return ContentService
+        .createTextOutput(JSON.stringify({ status: 'success', deletedRows: deleted }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+
+    // SAFETY GUARD: If ANY other action is present, NEVER fall through to row logging!
+    if (data.action) {
+      return ContentService
+        .createTextOutput(JSON.stringify({ status: 'error', message: 'Unrecognized action: ' + data.action }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+
+    // 5. Normal transaction logging
     var date, title, type, amount, tag, effectiveMonthly, raw;
 
     if (data.date && data.title) {
       date    = data.date;
       title   = data.title || '';
       type    = data.type || 'Debit';
-      amount  = data.amount || 0;
+      amount  = parseFloat(data.amount) || 0;
       tag     = data.tag || 'Normal';
-      effectiveMonthly = data.effectiveMonthly != null ? data.effectiveMonthly : amount;
+      effectiveMonthly = data.effectiveMonthly != null ? parseFloat(data.effectiveMonthly) : amount;
       raw     = data.raw || '';
     } else if (data.parsed) {
       var p   = data.parsed;
       date    = new Date().toLocaleDateString('en-IN');
       title   = p.title || '';
       type    = p.type || 'Debit';
-      amount  = p.amount || 0;
+      amount  = parseFloat(p.amount) || 0;
       tag     = p.suggestedTag || 'Normal';
-      effectiveMonthly = p.effectiveMonthlyCost != null ? p.effectiveMonthlyCost : amount;
+      effectiveMonthly = p.effectiveMonthlyCost != null ? parseFloat(p.effectiveMonthlyCost) : amount;
       raw     = data.sms || p.rawSms || '';
     } else {
-      date    = new Date().toLocaleDateString('en-IN');
-      title   = data.title || 'Unknown';
-      type    = data.type || 'Debit';
-      amount  = data.amount || 0;
-      tag     = 'Normal';
-      effectiveMonthly = amount;
-      raw     = JSON.stringify(data);
+      return ContentService
+        .createTextOutput(JSON.stringify({ status: 'ignored', message: 'Missing transaction data' }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+
+    // STRICT GUARD: Never append a row if amount is zero or title is missing!
+    if (amount <= 0 || !title || title === 'Unknown') {
+      return ContentService
+        .createTextOutput(JSON.stringify({ status: 'ignored', message: 'Amount is 0 or invalid title, skipped' }))
+        .setMimeType(ContentService.MimeType.JSON);
     }
 
     sheet.appendRow([date, title, type, amount, tag, effectiveMonthly, raw]);
@@ -325,8 +343,35 @@ function getMonthlySummary(sheet) {
 }
 
 function doGet(e) {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+
+  // Safe read-only query for recent transactions (cannot insert rows)
+  if (e && e.parameter && e.parameter.action === 'get_recent') {
+    var limit = parseInt(e.parameter.limit, 10) || 5;
+    var lastRow = sheet.getLastRow();
+    var startRow = Math.max(2, lastRow - limit + 1);
+    var count = lastRow - startRow + 1;
+    var recent = [];
+    if (count > 0 && lastRow >= 2) {
+      var rows = sheet.getRange(startRow, 1, count, 7).getValues();
+      for (var i = rows.length - 1; i >= 0; i--) {
+        recent.push({
+          date: rows[i][0],
+          title: (rows[i][1] || '').toString(),
+          type: (rows[i][2] || '').toString(),
+          amount: parseFloat(rows[i][3]) || 0,
+          tag: (rows[i][4] || '').toString(),
+          effective: parseFloat(rows[i][5]) || 0,
+          raw: (rows[i][6] || '').toString()
+        });
+      }
+    }
+    return ContentService
+      .createTextOutput(JSON.stringify({ status: 'success', transactions: recent }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+
   try {
-    var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
     sortSheetByDate(sheet);
   } catch (err) {}
 
@@ -334,3 +379,29 @@ function doGet(e) {
     .createTextOutput(JSON.stringify({ status: 'ok', message: 'Spends Tracker API is active' }))
     .setMimeType(ContentService.MimeType.JSON);
 }
+
+/**
+ * Utility to clean up accidental zero-amount or payload rows.
+ * Can be run directly from the Apps Script editor toolbar (select 'cleanZombieRows' -> click Run).
+ */
+function cleanZombieRows(targetSheet) {
+  var sheet = targetSheet || SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  var data = sheet.getDataRange().getValues();
+  var count = 0;
+
+  for (var i = data.length - 1; i >= 1; i--) {
+    var amt = parseFloat(data[i][3]) || 0;
+    var title = (data[i][1] || '').toString();
+    var raw = (data[i][6] || '').toString();
+
+    // Check if this row is an accidental/zombie payload or 0 amount log
+    if (amt <= 0 && (raw.indexOf('get_recent') !== -1 || raw.indexOf('action') !== -1 || title === 'Unknown' || title === '')) {
+      sheet.deleteRow(i + 1);
+      count++;
+    }
+  }
+
+  Logger.log('Cleaned up ' + count + ' zombie rows.');
+  return count;
+}
+
