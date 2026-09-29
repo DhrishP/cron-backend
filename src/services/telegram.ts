@@ -83,14 +83,16 @@ export async function sendMonthlySummaryAlert(summary: MonthlySummaryData, targe
   const text =
     `📊 <b>Monthly Financial Summary (${summary.period})</b>\n` +
     `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-    `💸 <b>Given / Sent (Debited):</b> ₹${summary.totalDebited.toLocaleString('en-IN')}\n` +
-    `💰 <b>Taken / Received (Credited):</b> ₹${summary.totalCredited.toLocaleString('en-IN')}\n` +
-    `⚖️ <b>Net Cash Flow:</b> ${netSign}₹${Math.abs(net).toLocaleString('en-IN')} (<i>${netLabel}</i>)\n` +
+    `🏦 <b>Bank Cash Flow (Real Money):</b>\n` +
+    `  • 💸 <b>Actual Spent (Debited):</b> ₹${summary.totalDebited.toLocaleString('en-IN')}\n` +
+    `  • 💰 <b>Received (Credited):</b> ₹${summary.totalCredited.toLocaleString('en-IN')}\n` +
+    `  • ⚖️ <b>Net Cash Flow:</b> ${netSign}₹${Math.abs(net).toLocaleString('en-IN')} (<i>${netLabel}</i>)\n` +
     `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-    `📉 <b>Effective Monthly Burn:</b> ₹${summary.effectiveMonthlyBurn.toLocaleString('en-IN')}\n` +
-    `  • <b>Regular Spends:</b> ₹${summary.normalSpends.toLocaleString('en-IN')}\n` +
-    `  • <b>Subscriptions & Yearly:</b> ₹${(summary.yearlyAmortized + summary.quarterlyAmortized).toLocaleString('en-IN')}/mo\n` +
-    `  • <b>Emergencies:</b> ₹${summary.emergencySpends.toLocaleString('en-IN')}\n` +
+    `📉 <b>True Monthly Burn (Operating Cost):</b>\n` +
+    `  • 🔥 <b>Effective Monthly Burn:</b> ₹${summary.effectiveMonthlyBurn.toLocaleString('en-IN')}\n` +
+    `    - <b>Regular Spends:</b> ₹${summary.normalSpends.toLocaleString('en-IN')}\n` +
+    `    - <b>Subscriptions & Yearly:</b> ₹${(summary.yearlyAmortized + summary.quarterlyAmortized).toLocaleString('en-IN')}/mo\n` +
+    `    - <b>Emergencies:</b> ₹${summary.emergencySpends.toLocaleString('en-IN')}\n` +
     `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
     `📝 <b>Total Transactions Logged:</b> ${summary.transactionCount}`;
 

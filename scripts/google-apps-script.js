@@ -307,54 +307,75 @@ function getMonthlySummary(sheet) {
   var currentYear = now.getFullYear();
   var data = sheet.getDataRange().getValues();
 
-  var totalDebited = 0, totalCredited = 0;
-  var normalSpends = 0, amortizedSpends = 0, emergencySpends = 0;
+  var actualCashDebited = 0;
+  var totalCredited = 0;
+  var normalSpends = 0;
+  var amortizedSpends = 0;
+  var emergencySpends = 0;
   var effectiveMonthlyBurn = 0;
   var count = 0;
 
   for (var i = 1; i < data.length; i++) {
     var rowDate = parseDateValue(data[i][0]);
     if (rowDate.getMonth() === currentMonth && rowDate.getFullYear() === currentYear) {
+      var title  = (data[i][1] || '').toString();
       var type   = (data[i][2] || '').toString();
       var amount = parseFloat(data[i][3]) || 0;
       var tag    = (data[i][4] || 'Normal').toString();
       var eff    = parseFloat(data[i][5]) || 0;
+      var raw    = (data[i][6] || '').toString();
 
-      // Exclude Credit Card bill payments and self-transfers from Burn, Given, and Taken
+      // Exclude transfers and credit card bill payments from all metrics
       if (type === 'Transfer' || tag === 'Transfer') {
         count++;
         continue;
       }
 
+      var isAmortizedOrSub = (
+        type === 'Amortized' ||
+        tag.indexOf('Amortized') !== -1 ||
+        tag === 'Yearly' ||
+        tag === 'Quarterly' ||
+        tag === 'Subscription' ||
+        title.indexOf('GST Filing') !== -1 ||
+        title.indexOf('YouTube Premium') !== -1 ||
+        raw.indexOf('Split ') !== -1 ||
+        raw.indexOf('Monthly ') !== -1
+      );
+
       if (type === 'Credit') {
         totalCredited += amount;
+      } else if (isAmortizedOrSub) {
+        // Amortized subscription slice:
+        // Does NOT debit actual bank cash this month (already pre-paid or recurring commitment)!
+        var monthlySlice = eff > 0 ? eff : amount;
+        amortizedSpends += monthlySlice;
+        effectiveMonthlyBurn += monthlySlice;
+      } else if (tag === 'Emergency') {
+        actualCashDebited += amount;
+        emergencySpends += amount;
       } else {
-        totalDebited += amount;
-        if (tag.indexOf('Amortized') !== -1 || tag === 'Yearly' || tag === 'Quarterly') {
-          amortizedSpends += eff;
-        } else if (tag === 'Emergency') {
-          emergencySpends += amount;
-        } else {
-          normalSpends += amount;
-        }
-        effectiveMonthlyBurn += eff;
+        // Real everyday debit/spend
+        actualCashDebited += amount;
+        normalSpends += amount;
+        effectiveMonthlyBurn += amount;
       }
       count++;
     }
   }
 
-  var netCashFlow = totalCredited - totalDebited;
+  var netCashFlow = totalCredited - actualCashDebited;
 
   return {
     period: now.toLocaleString('default', { month: 'long', year: 'numeric' }),
-    totalDebited: totalDebited,
-    totalCredited: totalCredited,
-    netCashFlow: netCashFlow,
-    effectiveMonthlyBurn: effectiveMonthlyBurn,
-    normalSpends: normalSpends,
-    yearlyAmortized: amortizedSpends,
+    totalDebited: Math.round(actualCashDebited * 100) / 100,
+    totalCredited: Math.round(totalCredited * 100) / 100,
+    netCashFlow: Math.round(netCashFlow * 100) / 100,
+    effectiveMonthlyBurn: Math.round(effectiveMonthlyBurn * 100) / 100,
+    normalSpends: Math.round(normalSpends * 100) / 100,
+    yearlyAmortized: Math.round(amortizedSpends * 100) / 100,
     quarterlyAmortized: 0,
-    emergencySpends: emergencySpends,
+    emergencySpends: Math.round(emergencySpends * 100) / 100,
     transactionCount: count
   };
 }
@@ -478,7 +499,7 @@ function populateOldSubscriptions() {
       var futureDate = new Date(targetYear, targetMonth, targetDay);
 
       var formattedDate = formatDate(futureDate);
-      var type = m === 1 ? 'Debit' : 'Amortized';
+      var type = 'Amortized';
       var amount = splitAmount;
       var tag = tagLabel;
       var effective = splitAmount;
@@ -506,14 +527,39 @@ function populateOldSubscriptions() {
         continue;
       }
 
-      var type = 'Debit';
+      var type = 'Amortized';
       var amount = monthlyAmount;
-      var tag = 'Normal';
+      var tag = 'Amortized (Monthly)';
       var effective = monthlyAmount;
       var raw = 'Monthly ' + baseTitle + ' for ' + monthYearLabel;
 
       rowsToAdd.push([formattedDate, fullTitle, type, amount, tag, effective, raw]);
     }
+  }
+
+  // Repair any existing historical subscription rows in the sheet so Type = 'Amortized'
+  var updatedRows = 0;
+  for (var r = 1; r < existingData.length; r++) {
+    var rTitle = (existingData[r][1] || '').toString();
+    var rRaw = (existingData[r][6] || '').toString();
+    var rType = (existingData[r][2] || '').toString();
+    var isSub = (
+      rRaw.indexOf('Split ') !== -1 ||
+      rRaw.indexOf('Monthly ') !== -1 ||
+      rTitle.indexOf('GST Filing') !== -1 ||
+      rTitle.indexOf('YouTube Premium') !== -1 ||
+      rTitle.indexOf('(1/3)') !== -1 ||
+      rTitle.indexOf('(1/12)') !== -1 ||
+      rTitle.indexOf('(1/6)') !== -1
+    );
+    if (isSub && rType !== 'Amortized') {
+      sheet.getRange(r + 1, 3).setValue('Amortized');
+      sheet.getRange(r + 1, 5).setValue('Amortized');
+      updatedRows++;
+    }
+  }
+  if (updatedRows > 0) {
+    Logger.log('Updated ' + updatedRows + ' existing subscription rows to Type: Amortized');
   }
 
   // If old Water Filter Servicing (₹150 rate) was previously added, remove it so the new ₹183.33 rate applies
