@@ -472,6 +472,15 @@ function populateOldSubscriptions() {
   // 3. Water Tank Cleaning (12 months, ₹1500 total, from 1 Sept 2026) -> ₹125/mo
   addAmortizedSplit('Water Tank Cleaning', 1500, 12, 1, 9, 2026);
 
+  // 4. Mediclaim (12 months, ₹8000 total, from 22 Aug 2026) -> ₹666.67/mo
+  addAmortizedSplit('Mediclaim', 8000, 12, 22, 8, 2026);
+
+  // 5. House Insurance (12 months, ₹4000 total, from 24 May 2026) -> ₹333.33/mo
+  addAmortizedSplit('House Insurance', 4000, 12, 24, 5, 2026);
+
+  // 6. Water Filter Servicing (12 months, ₹1800 total, from 1 Apr 2026) -> ₹150/mo
+  addAmortizedSplit('Water Filter Servicing', 1800, 12, 1, 4, 2026);
+
   if (rowsToAdd.length > 0) {
     var startRow = sheet.getLastRow() + 1;
     sheet.getRange(startRow, 1, rowsToAdd.length, 7).setValues(rowsToAdd);
