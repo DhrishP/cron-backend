@@ -170,6 +170,14 @@ function doPost(e) {
         .setMimeType(ContentService.MimeType.JSON);
     }
 
+    // 5. Handle populating old subscriptions
+    if (data.action === 'populate_old_subscriptions') {
+      populateOldSubscriptions();
+      return ContentService
+        .createTextOutput(JSON.stringify({ status: 'success', message: 'Populated old subscriptions and sorted sheet.' }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+
     // SAFETY GUARD: If ANY other action is present, NEVER fall through to row logging!
     if (data.action) {
       return ContentService
@@ -404,4 +412,77 @@ function cleanZombieRows(targetSheet) {
   Logger.log('Cleaned up ' + count + ' zombie rows.');
   return count;
 }
+
+/**
+ * Helper to populate old recurring subscriptions in splits.
+ * Can be run directly from Apps Script editor toolbar:
+ * Select 'populateOldSubscriptions' from dropdown -> click '▷ Run'.
+ */
+function populateOldSubscriptions() {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+
+  // 1. First clean up any accidental 0 zombie rows
+  var cleaned = cleanZombieRows(sheet);
+  Logger.log('Cleaned up ' + cleaned + ' zombie rows before populating.');
+
+  var existingData = sheet.getDataRange().getValues();
+  var existingTitles = {};
+  for (var r = 1; r < existingData.length; r++) {
+    existingTitles[(existingData[r][1] || '').toString()] = true;
+  }
+
+  var rowsToAdd = [];
+
+  function addAmortizedSplit(baseTitle, totalAmount, durationMonths, startDay, startMonth, startYear) {
+    var splitAmount = Math.round((totalAmount / durationMonths) * 100) / 100;
+    var tagLabel = 'Amortized (' + durationMonths + 'mo)';
+
+    for (var m = 1; m <= durationMonths; m++) {
+      var fullTitle = baseTitle + ' (' + m + '/' + durationMonths + ')';
+
+      // Avoid duplicating if already present
+      if (existingTitles[fullTitle]) {
+        Logger.log('Skipping existing: ' + fullTitle);
+        continue;
+      }
+
+      var targetYear = startYear;
+      var targetMonth = (startMonth - 1) + (m - 1);
+      var daysInTargetMonth = new Date(targetYear, targetMonth + 1, 0).getDate();
+      var targetDay = Math.min(startDay, daysInTargetMonth);
+      var futureDate = new Date(targetYear, targetMonth, targetDay);
+
+      var formattedDate = formatDate(futureDate);
+      var type = m === 1 ? 'Debit' : 'Amortized';
+      var amount = splitAmount;
+      var tag = tagLabel;
+      var effective = splitAmount;
+      var raw = 'Split ' + m + '/' + durationMonths + ' of ' + baseTitle + ' (₹' + totalAmount + ' total)';
+
+      rowsToAdd.push([formattedDate, fullTitle, type, amount, tag, effective, raw]);
+    }
+  }
+
+  // 1. Wifi Worldspace (6 months, ₹2500 total, from 25 Aug 2026) -> ₹416.67/mo
+  addAmortizedSplit('Wifi Worldspace', 2500, 6, 25, 8, 2026);
+
+  // 2. Internet Jio (3 months, ₹900 total, from 1 Sept 2026) -> ₹300/mo
+  addAmortizedSplit('Internet Jio', 900, 3, 1, 9, 2026);
+
+  // 3. Water Tank Cleaning (12 months, ₹1500 total, from 1 Sept 2026) -> ₹125/mo
+  addAmortizedSplit('Water Tank Cleaning', 1500, 12, 1, 9, 2026);
+
+  if (rowsToAdd.length > 0) {
+    var startRow = sheet.getLastRow() + 1;
+    sheet.getRange(startRow, 1, rowsToAdd.length, 7).setValues(rowsToAdd);
+    Logger.log('Added ' + rowsToAdd.length + ' split subscription rows.');
+  } else {
+    Logger.log('No new rows to add (all already exist).');
+  }
+
+  // Always keep sheet sorted chronologically by Date
+  sortSheetByDate(sheet);
+  Logger.log('Sheet sorted chronologically.');
+}
+
 
