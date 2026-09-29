@@ -528,6 +528,18 @@ function populateOldSubscriptions() {
   // 9. GST Filing (12 months, ₹500/mo, from 1 Apr 2026 to Mar 2027)
   addMonthlyRecurring('GST Filing', 500, 12, 1, 4, 2026);
 
+  // 10. ITR Filing (12 months, ₹2000 total, from 30 Aug 2026) -> ₹166.67/mo
+  addAmortizedSplit('ITR Filing', 2000, 12, 30, 8, 2026);
+
+  // 11. Domain curiouslymotivated.com (12 months, ₹977 total, from 8 Feb 2026) -> ₹81.42/mo
+  addAmortizedSplit('Domain curiouslymotivated.com', 977, 12, 8, 2, 2026);
+
+  // 12. Domain spwn.in (12 months, ₹572 total, from 10 Aug 2026) -> ₹47.67/mo
+  addAmortizedSplit('Domain spwn.in', 572, 12, 10, 8, 2026);
+
+  // 13. YouTube Premium (12 months recurring, ₹89/mo, from 1 Jan 2026 to Dec 2026)
+  addMonthlyRecurring('YouTube Premium', 89, 12, 1, 1, 2026);
+
   if (rowsToAdd.length > 0) {
     var startRow = sheet.getLastRow() + 1;
     sheet.getRange(startRow, 1, rowsToAdd.length, 7).setValues(rowsToAdd);
