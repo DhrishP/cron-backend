@@ -463,6 +463,44 @@ function populateOldSubscriptions() {
     }
   }
 
+  // Helper to add monthly recurring expenses (e.g. monthly GST filing)
+  function addMonthlyRecurring(baseTitle, monthlyAmount, countMonths, startDay, startMonth, startYear) {
+    for (var m = 1; m <= countMonths; m++) {
+      var targetYear = startYear;
+      var targetMonth = (startMonth - 1) + (m - 1);
+      var daysInTargetMonth = new Date(targetYear, targetMonth + 1, 0).getDate();
+      var targetDay = Math.min(startDay, daysInTargetMonth);
+      var dateObj = new Date(targetYear, targetMonth, targetDay);
+
+      var formattedDate = formatDate(dateObj);
+      var monthYearLabel = dateObj.toLocaleString('default', { month: 'short', year: 'numeric' });
+      var fullTitle = baseTitle + ' (' + monthYearLabel + ')';
+
+      if (existingTitles[fullTitle]) {
+        Logger.log('Skipping existing: ' + fullTitle);
+        continue;
+      }
+
+      var type = 'Debit';
+      var amount = monthlyAmount;
+      var tag = 'Normal';
+      var effective = monthlyAmount;
+      var raw = 'Monthly ' + baseTitle + ' for ' + monthYearLabel;
+
+      rowsToAdd.push([formattedDate, fullTitle, type, amount, tag, effective, raw]);
+    }
+  }
+
+  // If old Water Filter Servicing (₹150 rate) was previously added, remove it so the new ₹183.33 rate applies
+  for (var r = existingData.length - 1; r >= 1; r--) {
+    var rowTitle = (existingData[r][1] || '').toString();
+    var rowAmt = parseFloat(existingData[r][3]) || 0;
+    if (rowTitle.indexOf('Water Filter Servicing') !== -1 && Math.abs(rowAmt - 150) < 0.1) {
+      sheet.deleteRow(r + 1);
+      delete existingTitles[rowTitle];
+    }
+  }
+
   // 1. Wifi Worldspace (6 months, ₹2500 total, from 25 Aug 2026) -> ₹416.67/mo
   addAmortizedSplit('Wifi Worldspace', 2500, 6, 25, 8, 2026);
 
@@ -478,8 +516,17 @@ function populateOldSubscriptions() {
   // 5. House Insurance (12 months, ₹4000 total, from 24 May 2026) -> ₹333.33/mo
   addAmortizedSplit('House Insurance', 4000, 12, 24, 5, 2026);
 
-  // 6. Water Filter Servicing (12 months, ₹1800 total, from 1 Apr 2026) -> ₹150/mo
-  addAmortizedSplit('Water Filter Servicing', 1800, 12, 1, 4, 2026);
+  // 6. Water Filter Servicing (12 months, ₹2200 total, from 1 Apr 2026) -> ₹183.33/mo
+  addAmortizedSplit('Water Filter Servicing', 2200, 12, 1, 4, 2026);
+
+  // 7. Chacha Mediclaim (12 months, ₹5000 total, from 21 Aug 2026) -> ₹416.67/mo
+  addAmortizedSplit('Chacha Mediclaim', 5000, 12, 21, 8, 2026);
+
+  // 8. Property Tax (12 months, ₹1500 total, from 1 Apr 2026) -> ₹125/mo
+  addAmortizedSplit('Property Tax', 1500, 12, 1, 4, 2026);
+
+  // 9. GST Filing (12 months, ₹500/mo, from 1 Apr 2026 to Mar 2027)
+  addMonthlyRecurring('GST Filing', 500, 12, 1, 4, 2026);
 
   if (rowsToAdd.length > 0) {
     var startRow = sheet.getLastRow() + 1;
