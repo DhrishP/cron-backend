@@ -1,4 +1,5 @@
 import { logInfo, logError } from './logger.js';
+import { getRecentTransactionsForDeduplication } from './transactions.service.js';
 
 export interface RecentTransactionItem {
   sms: string;
@@ -47,54 +48,18 @@ export function getRecentTransactions(): RecentTransactionItem[] {
   return recentTransactions.filter(t => now - t.timestamp <= DEDUPLICATION_WINDOW_MS);
 }
 
-interface SheetRecentTransaction {
-  date?: string;
-  title?: string;
-  type?: string;
-  amount?: number;
-  tag?: string;
-  effective?: number;
-  raw?: string;
-}
-
-export async function fetchRecentTransactionsFromSheet(limit = 5): Promise<RecentTransactionItem[]> {
-  const sheetWebhookUrl = (process.env.GOOGLE_SHEET_WEBHOOK_URL || '').replace(/['"]/g, '').trim();
-  if (!sheetWebhookUrl) {
-    return [];
-  }
-
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 2500); // 2.5s timeout
-
+export async function fetchRecentTransactionsFromDb(limit = 5): Promise<RecentTransactionItem[]> {
   try {
-    const getUrl = `${sheetWebhookUrl}${sheetWebhookUrl.includes('?') ? '&' : '?'}action=get_recent&limit=${limit}`;
-    const res = await fetch(getUrl, {
-      method: 'GET',
-      signal: controller.signal,
-      redirect: 'follow',
-    });
-
-    clearTimeout(timeoutId);
-
-    if (!res.ok) {
-      logError('Failed to fetch recent transactions from sheet', { status: res.status });
-      return [];
-    }
-
-    const data = (await res.json()) as { status?: string; transactions?: SheetRecentTransaction[] };
-    if (data.status === 'success' && Array.isArray(data.transactions)) {
-      return data.transactions.map(t => ({
-        sms: t.raw || t.title || '',
-        title: t.title || 'Unknown',
-        amount: typeof t.amount === 'number' ? t.amount : 0,
-        type: t.type || 'Debit',
-        timestamp: Date.now(),
-      }));
-    }
-    return [];
+    const docs = await getRecentTransactionsForDeduplication(limit);
+    return docs.map(d => ({
+      sms: d.rawSms || d.title,
+      title: d.title,
+      amount: typeof d.amount === 'number' ? d.amount : 0,
+      type: d.type === 'credit' ? 'Credit' : d.type === 'transfer' ? 'Transfer' : 'Debit',
+      timestamp: d.date ? new Date(d.date).getTime() : Date.now(),
+    }));
   } catch (err) {
-    clearTimeout(timeoutId);
-    logError('Error fetching recent transactions from sheet (falling back to memory)', err);
+    logError('Error fetching recent transactions from DB for deduplication', err);
     return [];
   }
 }
@@ -115,15 +80,15 @@ export async function evaluateTransactionWithJev(
     return { isReal: true, isDuplicate: false, isTransfer: false, reason: 'circuit_open_bypass', confidence: 1 };
   }
 
-  // 1. Fetch persistent recent transactions from Google Sheet
-  const sheetRecents = await fetchRecentTransactionsFromSheet(5);
+  // 1. Fetch persistent recent transactions directly from MongoDB Atlas
+  const dbRecents = await fetchRecentTransactionsFromDb(5);
 
   // 2. Merge with any in-memory transactions
   const inMemoryRecents = getRecentTransactions();
   const seen = new Set<string>();
   const combinedRecents: RecentTransactionItem[] = [];
 
-  for (const item of [...inMemoryRecents, ...sheetRecents]) {
+  for (const item of [...inMemoryRecents, ...dbRecents]) {
     const key = `${item.amount}:${item.title}:${item.sms.slice(0, 50)}`;
     if (!seen.has(key)) {
       seen.add(key);

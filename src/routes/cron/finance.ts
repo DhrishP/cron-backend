@@ -3,7 +3,7 @@ import { logCronExecution, logInfo, logError } from '../../services/logger.js';
 import {
   sendMonthlySummaryAlert,
   MonthlySummaryData,
-  fetchMonthlySummaryFromSheet,
+  fetchMonthlySummaryFromDb,
   fetchSubscriptionRenewals,
   sendRenewalAlert,
 } from '../../services/telegram.js';
@@ -22,20 +22,7 @@ financeCronRouter.all('/summary', async (_req: Request, res: Response) => {
   try {
     logInfo(`Executing cron job: ${jobName}`);
 
-    const period = new Date().toLocaleString('default', { month: 'long', year: 'numeric' });
-    const fetched = await fetchMonthlySummaryFromSheet();
-
-    const summaryData: MonthlySummaryData = fetched || {
-      period,
-      totalDebited: 0,
-      totalCredited: 0,
-      effectiveMonthlyBurn: 0,
-      normalSpends: 0,
-      yearlyAmortized: 0,
-      quarterlyAmortized: 0,
-      emergencySpends: 0,
-      transactionCount: 0,
-    };
+    const summaryData = await fetchMonthlySummaryFromDb();
 
     // Send Telegram Notification
     const telegramSent = await sendMonthlySummaryAlert(summaryData);

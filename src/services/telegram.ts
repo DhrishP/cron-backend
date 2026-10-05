@@ -1,6 +1,11 @@
+import { ObjectId } from 'mongodb';
 import { ParsedTransaction } from '../types/index.js';
+import { TransactionTag } from '../types/models.js';
 import { logInfo, logError } from './logger.js';
 import { categorizeWithDeepInfra } from './deepinfra.js';
+import { getComprehensiveMonthlySummary } from './finance.service.js';
+import { getAllSubscriptions, getUpcomingRenewals, EnrichedSubscription } from './subscriptions.service.js';
+import { createTransaction, amortizeTransaction, updateTransaction } from './transactions.service.js';
 
 let cachedChatId: string | number | null = process.env.TELEGRAM_CHAT_ID || null;
 
@@ -10,10 +15,6 @@ export function setCachedChatId(chatId: string | number): void {
 
 export function getCachedChatId(): string | number | null {
   return cachedChatId || process.env.TELEGRAM_CHAT_ID || null;
-}
-
-export function getSheetWebhookUrl(): string {
-  return (process.env.GOOGLE_SHEET_WEBHOOK_URL || '').replace(/['"]/g, '').trim();
 }
 
 export function escapeHtml(str: string): string {
@@ -63,8 +64,9 @@ export interface MonthlySummaryData {
   netCashFlow?: number;
   effectiveMonthlyBurn: number;
   normalSpends: number;
-  yearlyAmortized: number;
-  quarterlyAmortized: number;
+  yearlyAmortized?: number;
+  quarterlyAmortized?: number;
+  subscriptionsBurn?: number;
   emergencySpends: number;
   transactionCount: number;
 }
@@ -79,6 +81,9 @@ export async function sendMonthlySummaryAlert(summary: MonthlySummaryData, targe
   const net = summary.netCashFlow !== undefined ? summary.netCashFlow : (summary.totalCredited - summary.totalDebited);
   const netSign = net >= 0 ? '+' : '-';
   const netLabel = net >= 0 ? 'Surplus / Inflow' : 'Net Outflow';
+  const subsBurn = summary.subscriptionsBurn !== undefined
+    ? summary.subscriptionsBurn
+    : ((summary.yearlyAmortized || 0) + (summary.quarterlyAmortized || 0));
 
   const text =
     `📊 <b>Monthly Financial Summary (${summary.period})</b>\n` +
@@ -91,7 +96,7 @@ export async function sendMonthlySummaryAlert(summary: MonthlySummaryData, targe
     `📉 <b>True Monthly Burn (Operating Cost):</b>\n` +
     `  • 🔥 <b>Effective Monthly Burn:</b> ₹${summary.effectiveMonthlyBurn.toLocaleString('en-IN')}\n` +
     `    - <b>Regular Spends:</b> ₹${summary.normalSpends.toLocaleString('en-IN')}\n` +
-    `    - <b>Subscriptions & Yearly:</b> ₹${(summary.yearlyAmortized + summary.quarterlyAmortized).toLocaleString('en-IN')}/mo\n` +
+    `    - <b>Subscriptions & Amortized:</b> ₹${subsBurn.toLocaleString('en-IN')}/mo\n` +
     `    - <b>Emergencies:</b> ₹${summary.emergencySpends.toLocaleString('en-IN')}\n` +
     `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
     `📝 <b>Total Transactions Logged:</b> ${summary.transactionCount}`;
@@ -99,46 +104,25 @@ export async function sendMonthlySummaryAlert(summary: MonthlySummaryData, targe
   return sendTelegramMessage(chatId, text);
 }
 
+export async function fetchMonthlySummaryFromDb(targetMonth?: number, targetYear?: number): Promise<MonthlySummaryData> {
+  const summary = await getComprehensiveMonthlySummary(targetMonth, targetYear);
+  return {
+    period: summary.period,
+    totalDebited: summary.totalDebited,
+    totalCredited: summary.totalCredited,
+    netCashFlow: summary.netCashFlow,
+    effectiveMonthlyBurn: summary.effectiveMonthlyBurn,
+    normalSpends: summary.normalSpends,
+    yearlyAmortized: summary.subscriptionsBurn,
+    quarterlyAmortized: 0,
+    subscriptionsBurn: summary.subscriptionsBurn,
+    emergencySpends: summary.emergencySpends,
+    transactionCount: summary.transactionCount,
+  };
+}
+
 export async function fetchMonthlySummaryFromSheet(): Promise<MonthlySummaryData | null> {
-  const sheetWebhookUrl = getSheetWebhookUrl();
-  if (!sheetWebhookUrl) return null;
-
-  // 1. Try GET first (reliable with Google 302 redirects)
-  try {
-    const getUrl = `${sheetWebhookUrl}${sheetWebhookUrl.includes('?') ? '&' : '?'}action=get_monthly_summary`;
-    const res = await fetch(getUrl, {
-      method: 'GET',
-      redirect: 'follow',
-    });
-    if (res.ok) {
-      const data = (await res.json()) as { status?: string; summary?: Partial<MonthlySummaryData> };
-      if (data.status === 'success' && data.summary) {
-        return data.summary as MonthlySummaryData;
-      }
-    }
-  } catch (err) {
-    logError('Error fetching monthly summary via GET, falling back to POST', err);
-  }
-
-  // 2. Fallback to POST
-  try {
-    const res = await fetch(sheetWebhookUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({ action: 'get_monthly_summary' }),
-      redirect: 'follow',
-    });
-    if (res.ok) {
-      const data = (await res.json()) as { status?: string; summary?: Partial<MonthlySummaryData> };
-      if (data.status === 'success' && data.summary) {
-        return data.summary as MonthlySummaryData;
-      }
-    }
-  } catch (err) {
-    logError('Error fetching monthly summary via POST', err);
-  }
-
-  return null;
+  return fetchMonthlySummaryFromDb();
 }
 
 export interface SubscriptionRenewalItem {
@@ -157,47 +141,31 @@ export interface SubscriptionRenewalItem {
 }
 
 export async function fetchSubscriptionRenewals(daysAhead = 45): Promise<SubscriptionRenewalItem[]> {
-  const sheetWebhookUrl = getSheetWebhookUrl();
-  if (!sheetWebhookUrl) {
+  try {
+    const activeSubs = await getAllSubscriptions({ status: 'active' });
+    const filtered = activeSubs.filter(s => s.daysRemaining <= daysAhead);
+    return filtered.map(s => {
+      const d = new Date(s.nextRenewalDate);
+      const expiryDate = d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+      return {
+        title: s.title,
+        duration: s.billingCycleMonths,
+        durationLabel: s.cycleLabel,
+        monthlyCost: s.monthlyBaselineCost,
+        totalAmount: s.totalAmount,
+        startDate: s.startDate ? new Date(s.startDate).toLocaleDateString('en-IN') : '',
+        expiryDate,
+        expiryTimestamp: d.getTime(),
+        daysRemaining: s.daysRemaining,
+        isOverdue: s.isOverdue,
+        isExpiringSoon: s.isExpiringSoon,
+        status: s.urgencyStatus,
+      };
+    });
+  } catch (err) {
+    logError('Error fetching subscription renewals from MongoDB Atlas', err);
     return [];
   }
-
-  // 1. First try GET (read-only, fast)
-  try {
-    const getUrl = `${sheetWebhookUrl}${sheetWebhookUrl.includes('?') ? '&' : '?'}action=get_renewals&days=${daysAhead}`;
-    const res = await fetch(getUrl, {
-      method: 'GET',
-      redirect: 'follow',
-    });
-    if (res.ok) {
-      const data = (await res.json()) as { status?: string; renewals?: SubscriptionRenewalItem[] };
-      if (data.status === 'success' && Array.isArray(data.renewals)) {
-        return data.renewals;
-      }
-    }
-  } catch (err) {
-    logError('Error fetching renewals via GET, falling back to POST', err);
-  }
-
-  // 2. Fallback to POST
-  try {
-    const res = await fetch(sheetWebhookUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({ action: 'get_renewals', days: daysAhead }),
-      redirect: 'follow',
-    });
-    if (res.ok) {
-      const data = (await res.json()) as { status?: string; renewals?: SubscriptionRenewalItem[] };
-      if (data.status === 'success' && Array.isArray(data.renewals)) {
-        return data.renewals;
-      }
-    }
-  } catch (err) {
-    logError('Error fetching renewals via POST', err);
-  }
-
-  return [];
 }
 
 export async function sendRenewalAlert(renewals: SubscriptionRenewalItem[], targetChatId?: string | number): Promise<boolean> {
@@ -250,7 +218,7 @@ export async function sendAllSubscriptionsList(renewals: SubscriptionRenewalItem
   if (renewals.length === 0) {
     return sendTelegramMessage(
       chatId,
-      `📋 <b>Tracked Subscriptions</b>\n\nNo recurring or split subscriptions found in your sheet.\n\n` +
+      `📋 <b>Tracked Subscriptions</b>\n\nNo recurring or active subscriptions found in database.\n\n` +
       `💡 <i>Tip: Amortized expenses (3m, 6m, 12m) are automatically tracked here!</i>`
     );
   }
@@ -289,45 +257,45 @@ export async function sendAllSubscriptionsList(renewals: SubscriptionRenewalItem
   return sendTelegramMessage(chatId, text);
 }
 
-export function getDefaultAlertKeyboard(row: number) {
+export function getDefaultAlertKeyboard(rowOrId: string | number) {
   return {
     inline_keyboard: [
       [
-        { text: '🗓 3 Months', callback_data: `tag:${row}:Amortized:3` },
-        { text: '🗓 6 Months', callback_data: `tag:${row}:Amortized:6` },
-        { text: '🗓 1 Year (12m)', callback_data: `tag:${row}:Amortized:12` },
+        { text: '🗓 3 Months', callback_data: `tag:${rowOrId}:Amortized:3` },
+        { text: '🗓 6 Months', callback_data: `tag:${rowOrId}:Amortized:6` },
+        { text: '🗓 1 Year (12m)', callback_data: `tag:${rowOrId}:Amortized:12` },
       ],
       [
-        { text: '🔢 Pick 2–12 Months', callback_data: `picker:${row}` },
-        { text: '🚨 Emergency', callback_data: `tag:${row}:Emergency:0` },
+        { text: '🔢 Pick 2–12 Months', callback_data: `picker:${rowOrId}` },
+        { text: '🚨 Emergency', callback_data: `tag:${rowOrId}:Emergency:0` },
       ],
     ],
   };
 }
 
-export function getMonthPickerKeyboard(row: number) {
+export function getMonthPickerKeyboard(rowOrId: string | number) {
   return {
     inline_keyboard: [
       [
-        { text: '2 mo', callback_data: `tag:${row}:Amortized:2` },
-        { text: '3 mo', callback_data: `tag:${row}:Amortized:3` },
-        { text: '4 mo', callback_data: `tag:${row}:Amortized:4` },
-        { text: '5 mo', callback_data: `tag:${row}:Amortized:5` },
+        { text: '2 mo', callback_data: `tag:${rowOrId}:Amortized:2` },
+        { text: '3 mo', callback_data: `tag:${rowOrId}:Amortized:3` },
+        { text: '4 mo', callback_data: `tag:${rowOrId}:Amortized:4` },
+        { text: '5 mo', callback_data: `tag:${rowOrId}:Amortized:5` },
       ],
       [
-        { text: '6 mo', callback_data: `tag:${row}:Amortized:6` },
-        { text: '7 mo', callback_data: `tag:${row}:Amortized:7` },
-        { text: '8 mo', callback_data: `tag:${row}:Amortized:8` },
-        { text: '9 mo', callback_data: `tag:${row}:Amortized:9` },
+        { text: '6 mo', callback_data: `tag:${rowOrId}:Amortized:6` },
+        { text: '7 mo', callback_data: `tag:${rowOrId}:Amortized:7` },
+        { text: '8 mo', callback_data: `tag:${rowOrId}:Amortized:8` },
+        { text: '9 mo', callback_data: `tag:${rowOrId}:Amortized:9` },
       ],
       [
-        { text: '10 mo', callback_data: `tag:${row}:Amortized:10` },
-        { text: '11 mo', callback_data: `tag:${row}:Amortized:11` },
-        { text: '12 mo', callback_data: `tag:${row}:Amortized:12` },
+        { text: '10 mo', callback_data: `tag:${rowOrId}:Amortized:10` },
+        { text: '11 mo', callback_data: `tag:${rowOrId}:Amortized:11` },
+        { text: '12 mo', callback_data: `tag:${rowOrId}:Amortized:12` },
       ],
       [
-        { text: '⬅️ Back', callback_data: `back:${row}` },
-        { text: '🚨 Emergency', callback_data: `tag:${row}:Emergency:0` },
+        { text: '⬅️ Back', callback_data: `back:${rowOrId}` },
+        { text: '🚨 Emergency', callback_data: `tag:${rowOrId}:Emergency:0` },
       ],
     ],
   };
@@ -335,7 +303,7 @@ export function getMonthPickerKeyboard(row: number) {
 
 export async function sendTransactionAlert(
   parsed: ParsedTransaction,
-  rowNumber?: number
+  rowOrId?: string | number
 ): Promise<boolean> {
   const chatId = getCachedChatId();
   if (!chatId) {
@@ -343,7 +311,7 @@ export async function sendTransactionAlert(
     return false;
   }
 
-  const row = rowNumber || 0;
+  const row = rowOrId || 0;
   const safeTitle = escapeHtml(parsed.title);
   const safeType = escapeHtml(parsed.type);
 
@@ -420,48 +388,45 @@ export async function handleTelegramCallback(callbackQuery: {
     return;
   }
 
-  // Expected callback data: "tag:<row>:<tagName>:<duration>"
+  // Expected callback data: "tag:<rowOrId>:<tagName>:<duration>"
   const parts = data.split(':');
   if (parts[0] !== 'tag' || parts.length < 4) {
     return;
   }
 
-  const row = parseInt(parts[1], 10);
+  const rowOrId = parts[1];
   const tagName = parts[2];
   const duration = parseInt(parts[3], 10);
 
-  logInfo(`Telegram button pressed for Row ${row}: ${tagName} (${duration} mo)`);
+  logInfo(`Telegram button pressed for Item ${rowOrId}: ${tagName} (${duration} mo)`);
 
-  // Update Google Sheet via webhook if configured
-  const sheetWebhookUrl = getSheetWebhookUrl();
   let updateSuccess = false;
-  let createdFutureRows = 0;
   let monthlyCost = 0;
 
-  if (sheetWebhookUrl) {
+  // Update MongoDB Atlas if valid ObjectId
+  if (ObjectId.isValid(rowOrId)) {
     try {
-      const res = await fetch(sheetWebhookUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-        body: JSON.stringify({
-          action: 'update_tag',
-          row,
-          tag: tagName,
-          duration,
-        }),
-        redirect: 'follow',
-      });
-      const resJson = await res.json() as {
-        status?: string;
-        row?: number;
-        createdRows?: number;
-        monthlyCost?: number;
-      };
-      updateSuccess = resJson.status === 'success' || resJson.status === 'updated';
-      if (resJson.createdRows) createdFutureRows = resJson.createdRows;
-      if (resJson.monthlyCost) monthlyCost = resJson.monthlyCost;
+      if (duration > 1) {
+        const updated = await amortizeTransaction(rowOrId, duration);
+        if (updated) {
+          updateSuccess = true;
+          monthlyCost = updated.effectiveMonthly || Math.round((updated.amount / duration) * 100) / 100;
+        }
+      } else if (tagName === 'Emergency') {
+        const updated = await updateTransaction(rowOrId, {
+          tag: 'Emergency',
+          type: 'debit',
+        });
+        if (updated) updateSuccess = true;
+      } else {
+        const updated = await updateTransaction(rowOrId, {
+          tag: tagName as TransactionTag,
+        });
+        if (updated) updateSuccess = true;
+      }
+      logInfo('Updated transaction in MongoDB from Telegram button', { id: rowOrId, tag: tagName, duration, monthlyCost });
     } catch (err) {
-      logError('Failed to update Google Sheet row via Telegram callback', err);
+      logError('Failed to update transaction in MongoDB via Telegram callback', err);
     }
   }
 
@@ -482,20 +447,18 @@ export async function handleTelegramCallback(callbackQuery: {
     if (duration > 1) {
       const perMo = monthlyCost > 0 ? ` (₹${monthlyCost.toLocaleString('en-IN')}/mo)` : '';
       confirmationText += `✅ <b>Amortized over ${duration} months${perMo}</b>`;
-      if (createdFutureRows > 0) {
-        confirmationText += `\n📊 Generated ${createdFutureRows} future monthly rows in Google Sheet!`;
-      } else if (updateSuccess) {
-        confirmationText += `\n📊 Google Sheet updated!`;
+      if (updateSuccess) {
+        confirmationText += `\n💾 <i>Database updated!</i>`;
       }
     } else if (tagName === 'Emergency') {
       confirmationText += `✅ <b>Tagged as: Emergency</b> (Excluded from monthly baseline)`;
       if (updateSuccess) {
-        confirmationText += `\n📊 Google Sheet updated!`;
+        confirmationText += `\n💾 <i>Database updated!</i>`;
       }
     } else {
       confirmationText += `✅ <b>Tagged as: ${tagName}</b>`;
       if (updateSuccess) {
-        confirmationText += `\n📊 Google Sheet updated!`;
+        confirmationText += `\n💾 <i>Database updated!</i>`;
       }
     }
 
@@ -535,21 +498,7 @@ export async function handleDirectTextMessage(chatId: string | number, text: str
 
   // 2. /summary command
   if (trimmed.startsWith('/summary') || trimmed.toLowerCase() === 'summary') {
-    const period = new Date().toLocaleString('default', { month: 'long', year: 'numeric' });
-    const fetched = await fetchMonthlySummaryFromSheet();
-
-    const summaryData: MonthlySummaryData = fetched || {
-      period,
-      totalDebited: 0,
-      totalCredited: 0,
-      effectiveMonthlyBurn: 0,
-      normalSpends: 0,
-      yearlyAmortized: 0,
-      quarterlyAmortized: 0,
-      emergencySpends: 0,
-      transactionCount: 0,
-    };
-
+    const summaryData = await fetchMonthlySummaryFromDb();
     await sendMonthlySummaryAlert(summaryData, chatId);
     return;
   }
@@ -571,7 +520,7 @@ export async function handleDirectTextMessage(chatId: string | number, text: str
     return;
   }
 
-  // 3. User sent a manual expense text (e.g. "500 cash chai" or "12000 wifi")
+  // 4. User sent a manual expense text (e.g. "500 cash chai" or "12000 wifi")
   try {
     const parsed = await categorizeWithDeepInfra(trimmed, 'Manual / Telegram');
 
@@ -585,39 +534,35 @@ export async function handleDirectTextMessage(chatId: string | number, text: str
       return;
     }
 
-    // Forward to Google Sheet
-    const sheetWebhookUrl = getSheetWebhookUrl();
-    let loggedRow: number | undefined;
+    // Save directly to MongoDB Atlas
+    let dbTxId: string | undefined;
+    try {
+      const typeLower = parsed.type.toLowerCase();
+      let txType: 'debit' | 'credit' | 'transfer' = 'debit';
+      if (typeLower.includes('credit')) txType = 'credit';
+      else if (typeLower.includes('transfer')) txType = 'transfer';
 
-    if (sheetWebhookUrl) {
-      try {
-        const forwardResponse = await fetch(sheetWebhookUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-          body: JSON.stringify({
-            date: new Date().toLocaleDateString('en-IN'),
-            title: parsed.title,
-            type: parsed.type,
-            amount: parsed.amount,
-            tag: parsed.suggestedTag || 'Normal',
-            effectiveMonthly: parsed.effectiveMonthlyCost || parsed.amount,
-            raw: trimmed,
-            sms: trimmed,
-            sender: 'Telegram Direct',
-            parsed,
-          }),
-          redirect: 'follow',
-        });
-        if (forwardResponse.ok) {
-          const resData = await forwardResponse.json() as { row?: number };
-          loggedRow = resData.row;
-        }
-      } catch (fwdErr) {
-        logError('Failed to forward manual Telegram spend to Google Sheets', fwdErr);
-      }
+      const tag: TransactionTag =
+        parsed.suggestedTag === 'Emergency' ? 'Emergency' : (parsed.suggestedTag === 'Transfer' ? 'Transfer' : 'Normal');
+
+      const saved = await createTransaction({
+        title: parsed.title,
+        amount: parsed.amount,
+        type: txType,
+        category: parsed.category || 'Manual Spend',
+        tag,
+        effectiveMonthly: parsed.effectiveMonthlyCost || parsed.amount,
+        rawSms: trimmed,
+        date: new Date(),
+        source: 'telegram',
+      });
+      dbTxId = saved._id?.toString();
+      logInfo('Saved manual Telegram transaction to MongoDB', { id: dbTxId, title: parsed.title, amount: parsed.amount });
+    } catch (dbErr) {
+      logError('Failed to save manual Telegram transaction to MongoDB', dbErr);
     }
 
-    const row = loggedRow || 0;
+    const rowOrId = dbTxId || '0';
     const safeTitle = escapeHtml(parsed.title);
     const safeType = escapeHtml(parsed.type);
 
@@ -637,7 +582,7 @@ export async function handleDirectTextMessage(chatId: string | number, text: str
       `📌 <b>${safeTitle}</b> (${safeType})\n` +
       `📊 <i>Logged as <b>Normal</b> by default. Split across multiple months:</i>`;
 
-    await sendTelegramMessage(chatId, confirmText, getDefaultAlertKeyboard(row));
+    await sendTelegramMessage(chatId, confirmText, getDefaultAlertKeyboard(rowOrId));
   } catch (err) {
     logError('Error logging manual Telegram transaction', err);
     await sendTelegramMessage(chatId, `❌ Failed to log transaction: ${escapeHtml(err instanceof Error ? err.message : 'Unknown error')}`);

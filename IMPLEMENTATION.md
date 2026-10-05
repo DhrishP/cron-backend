@@ -1,379 +1,245 @@
-# SpendSpace — Architecture & Implementation Plan
-**A Modern, Bank-Grade Personal Finance Tracker & Renewal Engine**  
-*Migrating from Google Sheets to MongoDB Atlas + Express Backend + React PWA (KeepSpace Aesthetics) on Vercel*
+# Spends & Subscriptions Platform — Architectural Blueprint & Implementation Specification
+
+> **Target:** Replace brittle Google Apps Script / Google Sheets with a high-performance, bank-grade personal finance PWA powered by MongoDB, Express, and React (Vite), matching the dark-mode aesthetic of `@keepspace`.
 
 ---
 
-## 1. Executive Summary & Core Philosophy
+## 1. Executive Summary & Problem Diagnosis
 
-The current Google Sheets integration provided an initial prototype, but suffers from inherent architectural constraints:
-- **3–5 second latency** per webhook call.
-- **HTTP 302 redirect incompatibilities** with Google Apps Script Web Apps.
-- **Ledger pollution** from 130+ future amortized "ghost" rows stretching into 2027.
-- **Double-counting risks** when real monthly SMS debits (e.g. YouTube Premium, GST) hit already pre-generated rows.
+### 1.1 The Limitations of the Google Sheets Engine
+The Google Sheets + Apps Script implementation successfully validated the core concept of automated SMS tracking, AI categorization, and Telegram alerting. However, it reached hard architectural limits:
 
-### The Solution: "SpendSpace"
-A production-grade, full-stack personal finance system:
-1. **Database:** MongoDB Atlas (M0 / Dedicated) with strict Mongoose schemas and sub-50ms query times.
-2. **Backend:** Serverless Express API running on Vercel, directly receiving MacroDroid bank SMS and Telegram webhooks.
-3. **Frontend:** Mobile-first Progressive Web App (PWA) with the **exact visual aesthetic and design tokens of `@keepspace`** (Zinc-950 dark theme, Space Grotesk metrics, Plus Jakarta Sans typography, and glassmorphic cards).
-4. **Automation:** Proactive Telegram alerts for renewals (3m, 6m, 12m) and interactive bot commands (`/summary`, `/renewals`).
+| Dimension | Google Sheets + Apps Script | MongoDB + Native PWA Engine |
+| :--- | :--- | :--- |
+| **Data Integrity** | Ghost rows for future months (e.g. July 2027) clutter the ledger and pollute deduplication queries (`get_recent`). | Strict append-only ledger for past/present spends; dedicated collection for recurring subscriptions. |
+| **Latency** | 2.5s – 6.0s round-trip execution on Google's cloud. | Sub-50ms query execution via MongoDB connection pooling and indexed collections. |
+| **HTTP Reliability** | Google Web Apps execute 302 Found redirects that fail with HTML error pages on standard POST clients. | Standard RFC-compliant HTTP REST API hosted directly on Vercel Serverless. |
+| **User Experience** | Manual scrolling through rows on a mobile spreadsheet; fragile formatting. | Installable Progressive Web App (PWA) with tactile micro-interactions, dark mode, and instant search. |
 
 ---
 
-## 2. High-Level System Architecture
+## 2. System Architecture & Information Architecture
 
-```
-                    ┌─────────────────────────────────────────┐
-                    │      MacroDroid Android Bank SMS        │
-                    │                   &                     │
-                    │        Interactive Telegram Bot         │
-                    └────────────────────┬────────────────────┘
-                                         │
-                                         ▼
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│                              Vercel Unified Deployment                                 │
-│                                                                                        │
-│   ┌────────────────────────────────────────┐   ┌───────────────────────────────────┐   │
-│   │        Express API (/api/*)            │   │      React PWA Frontend (/)       │   │
-│   │  • /api/webhooks/macrodroid            │   │  • KeepSpace Zinc-950 Design      │   │
-│   │  • /api/webhooks/telegram              │   │  • Plus Jakarta Sans & Space Gro. │   │
-│   │  • /api/cron/finance/summary           │   │  • Cash Flow vs True Burn Hero    │   │
-│   │  • /api/cron/finance/renewals          │   │  • Subscriptions & Countdown Grid │   │
-│   │  • /api/transactions (CRUD + Filter)   │   │  • Clean Ledger View              │   │
-│   │  • /api/subscriptions (CRUD)           │   │  • Standalone Mobile Manifest     │   │
-│   └───────────────────┬────────────────────┘   └─────────────────┬─────────────────┘   │
-└───────────────────────┼──────────────────────────────────────────┼─────────────────────┘
-                        │                                          │
-                        ▼                                          ▼
-             ┌──────────────────────────────────────────────────────────────┐
-             │                     MongoDB Atlas                            │
-             │   • transactions (actual ledger — strictly past & present)   │
-             │   • subscriptions (renewal registry & monthly allocations)   │
-             └──────────────────────────────────────────────────────────────┘
+```mermaid
+graph TD
+    subgraph Ingestion Layer
+        A[MacroDroid Android SMS Webhook] -->|Raw Bank SMS| C[Vercel Serverless Express API]
+        B[Telegram Direct Message / Cash Entry] -->|Manual Spend / Command| C
+    end
+
+    subgraph Processing & Intelligence Layer
+        C -->|Categorize & Classify| D[Jev API / DeepInfra LLM]
+        D -->|Parsed & Tagged Entity| C
+    end
+
+    subgraph Persistence Layer (MongoDB Atlas)
+        C -->|Write real spend| E[(transactions)]
+        C -->|Query / Update| F[(subscriptions)]
+    end
+
+    subgraph User Experience & Notification Layer
+        C -->|Interactive Buttons & Summaries| G[Telegram Bot]
+        H[PWA Mobile / Desktop App (KeepSpace UI)] <-->|REST API JSON| C
+    end
 ```
 
 ---
 
-## 3. Database Schema & Data Modeling (MongoDB)
+## 3. KeepSpace Design System & Aesthetics Specification
 
-### 3.1. Collection: `transactions`
-Represents the **clean cashbook**. A record is inserted **only when money actually moves** in real life. No future phantom rows.
+The user interface adopts the identical visual hierarchy, typography, and palette found in `@keepspace`:
 
-```typescript
-import { Schema, model, Document, Types } from 'mongoose';
-
-export interface ITransaction extends Document {
-  date: Date;
-  title: string;              // "Swiggy", "Shell Petrol", "Client Payment"
-  type: 'debit' | 'credit' | 'transfer';
-  amount: number;             // Real amount moved from/to bank
-  category: string;           // "Food & Dining", "Utilities", "Health", "Income", etc.
-  tag: 'Normal' | 'Amortized' | 'Emergency' | 'Transfer';
-  amortization?: {
-    isAmortized: boolean;
-    durationMonths: number;   // 3, 6, 12
-    monthlyShare: number;     // amount / durationMonths
-    subscriptionId?: Types.ObjectId;
-  };
-  rawSms?: string;
-  source: 'sms' | 'telegram' | 'manual' | 'sheet_migration';
-  createdAt: Date;
-  updatedAt: Date;
-}
-
-const TransactionSchema = new Schema<ITransaction>(
-  {
-    date: { type: Date, required: true, index: true },
-    title: { type: String, required: true, trim: true, index: true },
-    type: { type: String, enum: ['debit', 'credit', 'transfer'], required: true },
-    amount: { type: Number, required: true, min: 0 },
-    category: { type: String, default: 'General', index: true },
-    tag: { type: String, enum: ['Normal', 'Amortized', 'Emergency', 'Transfer'], default: 'Normal' },
-    amortization: {
-      isAmortized: { type: Boolean, default: false },
-      durationMonths: { type: Number, default: 1 },
-      monthlyShare: { type: Number, default: 0 },
-      subscriptionId: { type: Schema.Types.ObjectId, ref: 'Subscription' },
-    },
-    rawSms: { type: String, trim: true },
-    source: { type: String, enum: ['sms', 'telegram', 'manual', 'sheet_migration'], default: 'sms' },
-  },
-  { timestamps: true }
-);
-
-TransactionSchema.index({ date: -1, createdAt: -1 });
-```
-
----
-
-### 3.2. Collection: `subscriptions`
-The single source of truth for **annual, quarterly, and monthly recurring commitments**.
-
-```typescript
-export interface ISubscription extends Document {
-  title: string;              // "Wifi Worldspace", "Internet Jio", "Mediclaim"
-  category: 'Utilities' | 'Health' | 'Insurance' | 'Domains' | 'Tax' | 'Streaming' | 'Other';
-  totalAmount: number;        // e.g. ₹8,000
-  billingCycle: '1m' | '3m' | '6m' | '12m'; // or custom months
-  durationMonths: number;     // 1, 3, 6, 12
-  monthlyCost: number;        // e.g. ₹666.67
-  startDate: Date;            // e.g. 22 Aug 2026
-  nextRenewalDate: Date;      // e.g. 22 Aug 2027
-  status: 'active' | 'paused' | 'cancelled';
-  remindDaysBefore: number;   // default: 30 days
-  autoRenew: boolean;
-  notes?: string;
-  createdAt: Date;
-  updatedAt: Date;
-}
-
-const SubscriptionSchema = new Schema<ISubscription>(
-  {
-    title: { type: String, required: true, unique: true, trim: true },
-    category: {
-      type: String,
-      enum: ['Utilities', 'Health', 'Insurance', 'Domains', 'Tax', 'Streaming', 'Other'],
-      default: 'Utilities',
-    },
-    totalAmount: { type: Number, required: true },
-    billingCycle: { type: String, enum: ['1m', '3m', '6m', '12m'], required: true },
-    durationMonths: { type: Number, required: true },
-    monthlyCost: { type: Number, required: true },
-    startDate: { type: Date, required: true },
-    nextRenewalDate: { type: Date, required: true, index: true },
-    status: { type: String, enum: ['active', 'paused', 'cancelled'], default: 'active' },
-    remindDaysBefore: { type: Number, default: 30 },
-    autoRenew: { type: Boolean, default: true },
-    notes: { type: String },
-  },
-  { timestamps: true }
-);
-
-SubscriptionSchema.index({ status: 1, nextRenewalDate: 1 });
-```
-
----
-
-## 4. UI / UX Design System (Matching `@keepspace`)
-
-The frontend will use the exact design system and CSS tokens found in `/Users/whycurious/code/projects/keepspace/frontend/src/index.css`.
-
-### 4.1. Design Tokens & Theme Variables
+### 3.1 Design Tokens (CSS Variables)
 
 ```css
 :root {
-  /* KeepSpace Dark Theme (Zinc-950) */
-  --bg-primary: #09090b;       /* Zinc-950 main surface */
-  --bg-secondary: #09090b;     /* Zinc-950 sidebar & header */
-  --bg-tertiary: #18181b;      /* Zinc-900 inputs & card backgrounds */
-  --card-bg: #18181b;          /* Zinc-900 card surface */
+  /* KeepSpace Shadcn-Inspired Dark Theme */
+  --bg-primary: #09090b;       /* Deep Zinc-950 canvas */
+  --bg-secondary: #121215;     /* Zinc-900 elevated surface */
+  --bg-tertiary: #18181b;      /* Input fields & sub-cards */
+  --card-bg: #141417;          /* Primary card containers */
   
-  --border-color: #27272a;     /* Zinc-800 borders */
-  --border-light: rgba(255, 255, 255, 0.06);
+  --border-color: #27272a;     /* Zinc-800 subtle borders */
+  --border-light: rgba(255, 255, 255, 0.07);
   --hover-bg: rgba(255, 255, 255, 0.04);
   
-  --accent-primary: #fafafa;   /* Zinc-50 high contrast */
-  --accent-blue: #3b82f6;      /* Blue-500 interactive elements */
-  --accent-gradient: linear-gradient(135deg, #fafafa 0%, #a1a1aa 100%);
-  --accent-glow: rgba(255, 255, 255, 0.05);
+  --accent-primary: #fafafa;   /* High-contrast crisp text */
+  --accent-blue: #3b82f6;      /* Brand accent / action trigger */
+  --accent-blue-glow: rgba(59, 130, 246, 0.15);
   
-  --text-primary: #fafafa;     /* High contrast white */
-  --text-secondary: #a1a1aa;   /* Zinc-400 subtitle text */
-  --text-muted: #71717a;       /* Zinc-500 placeholders */
+  --text-primary: #fafafa;     /* Primary headings and amounts */
+  --text-secondary: #a1a1aa;   /* Metadata and labels */
+  --text-muted: #71717a;       /* Timestamps and placeholders */
   
-  --success: #10b981;          /* Emerald (credits / active) */
-  --warning: #f59e0b;          /* Amber (expiring soon) */
-  --danger: #ef4444;           /* Rose (debits / overdue) */
+  --success: #10b981;          /* Credited / Active / Safe */
+  --warning: #f59e0b;          /* Expiring soon (< 30 days) */
+  --danger: #ef4444;           /* Overdue / High spend */
   
-  --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-sans: 'Plus Jakarta Sans', -apple-system, sans-serif;
   --font-display: 'Space Grotesk', sans-serif;
   --font-mono: 'JetBrains Mono', monospace;
   
-  --border-radius-sm: 6px;
-  --border-radius-md: 8px;
-  --border-radius-lg: 12px;
-  --border-radius-xl: 16px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+}
+```
+
+---
+
+## 4. MongoDB Database Schemas
+
+### 4.1 `transactions` Collection
+Represents the **immutable ledger** of actual financial transactions.
+
+```typescript
+import { ObjectId } from 'mongodb';
+
+export interface TransactionDocument {
+  _id?: ObjectId;
+  date: Date;                         // Actual transaction timestamp
+  title: string;                      // Merchant or description (e.g., "Swiggy", "Shell Petrol")
+  type: 'debit' | 'credit' | 'transfer';
+  amount: number;                     // Real currency transferred (in INR)
+  category: string;                   // "Food & Dining", "Utilities", "Health", "Investments", etc.
+  tag: 'Normal' | 'Amortized' | 'Emergency' | 'Transfer';
   
-  --transition-smooth: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  // Amortization metadata (if converted to a monthly split)
+  amortization?: {
+    isAmortized: boolean;
+    durationMonths: number;           // 3, 6, 12
+    monthlyShare: number;             // amount / durationMonths
+    subscriptionId?: ObjectId;        // Linked subscription if applicable
+  };
+
+  rawSms?: string;                    // Preserved raw SMS content for auditing
+  source: 'sms_macrodroid' | 'telegram' | 'manual_pwa' | 'sheet_migration';
+  createdAt: Date;
+  updatedAt: Date;
 }
 ```
 
-### 4.2. Core PWA Views
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│  SpendSpace                  [+ Quick Log]  [🔔 Renewals]   │
-├─────────────────────────────────────────────────────────────┤
-│  ┌─────────────────────────┐   ┌─────────────────────────┐  │
-│  │ 🏦 Actual Bank Outflow   │   │ 📉 True Monthly Burn    │  │
-│  │   ₹3,705.16             │   │   ₹7,156.59 / mo        │  │
-│  │   Inflow: ₹287.00       │   │   Regular: ₹3,705.16    │  │
-│  │   Net: -₹3,418.16       │   │   Subs: ₹3,451.43/mo    │  │
-│  └─────────────────────────┘   └─────────────────────────┘  │
-├─────────────────────────────────────────────────────────────┤
-│  ⏳ Upcoming Renewals & Amortized Subscriptions             │
-│  ┌───────────────────────────────────────────────────────┐  │
-│  │ 🟡 Internet Jio (3 Months)       • Due: 01/12/2026    │  │
-│  │    ₹900 total (₹300.00/mo)       • 63 days left       │  │
-│  ├───────────────────────────────────────────────────────┤  │
-│  │ 🟢 Wifi Worldspace (6 Months)    • Due: 25/02/2027    │  │
-│  │    ₹2,500 total (₹416.67/mo)     • 149 days left      │  │
-│  ├───────────────────────────────────────────────────────┤  │
-│  │ 🟢 Mediclaim (12 Months)         • Due: 22/08/2027    │  │
-│  │    ₹8,000 total (₹666.67/mo)     • 327 days left      │  │
-│  └───────────────────────────────────────────────────────┘  │
-├─────────────────────────────────────────────────────────────┤
-│  📋 Recent Activity (Ledger)            [🔍 Search spends]  │
-│  • Swiggy                        -₹420.00   Food            │
-│  • Petrol                        -₹500.00   Commute         │
-│  • Client Payment                +₹287.00   Credit          │
-└─────────────────────────────────────────────────────────────┘
-```
+**Indexes:**
+- `{ date: -1 }` (Optimizes chronological ledger listing)
+- `{ type: 1, date: -1 }` (Optimizes monthly burn and cash flow calculations)
+- `{ title: 'text', rawSms: 'text' }` (Full-text search across spends)
 
 ---
 
-## 5. PWA Manifest & Installation (`manifest.json`)
+### 4.2 `subscriptions` Collection
+Represents the **recurring schedule and renewal registry**. This eliminates all phantom rows from the daily ledger.
 
-To enable native-like installation on iOS Safari and Android Chrome:
-
-```json
-{
-  "id": "/",
-  "short_name": "SpendSpace",
-  "name": "SpendSpace — Financial Command & Renewal Engine",
-  "start_url": "/",
-  "scope": "/",
-  "display": "standalone",
-  "orientation": "portrait-primary",
-  "background_color": "#09090b",
-  "theme_color": "#09090b",
-  "description": "Bank-grade personal finance ledger, true monthly burn calculator, and subscription renewal tracker.",
-  "icons": [
-    {
-      "src": "/icon-192.png",
-      "sizes": "192x192",
-      "type": "image/png",
-      "purpose": "any maskable"
-    },
-    {
-      "src": "/icon-512.png",
-      "sizes": "512x512",
-      "type": "image/png",
-      "purpose": "any maskable"
-    }
-  ]
+```typescript
+export interface SubscriptionDocument {
+  _id?: ObjectId;
+  title: string;                      // "Wifi Worldspace", "Internet Jio", "Mediclaim"
+  category: 'Utilities' | 'Health' | 'Insurance' | 'Domains' | 'Tax' | 'Streaming' | 'Other';
+  totalAmount: number;                // Full renewal cost (e.g. ₹8,000 for 12m)
+  billingCycleMonths: number;         // 1, 3, 6, 12
+  monthlyBaselineCost: number;        // totalAmount / billingCycleMonths (e.g. ₹666.67/mo)
+  
+  startDate: Date;                    // Initial purchase date
+  nextRenewalDate: Date;              // Computed expiry date
+  remindDaysBefore: number;           // Days prior to alert (default: 30)
+  
+  status: 'active' | 'paused' | 'cancelled';
+  autoRenew: boolean;
+  notes?: string;                     // e.g. "curiouslymotivated.com on Namecheap"
+  
+  lastPaidTransactionId?: ObjectId;   // Reference to actual spend record
+  createdAt: Date;
+  updatedAt: Date;
 }
 ```
 
----
-
-## 6. Calculation Logic: Real Cash Flow vs. True Monthly Burn
-
-The MongoDB aggregation pipeline calculates both metrics simultaneously with zero ambiguity:
-
-### 1. Bank Cash Flow (Cash Basis)
-```typescript
-// Query: All transactions where date falls in the current month
-const actualBankDebits = transactions
-  .filter(t => t.type === 'debit' && t.tag !== 'Transfer')
-  .reduce((sum, t) => sum + t.amount, 0);
-
-const actualBankCredits = transactions
-  .filter(t => t.type === 'credit')
-  .reduce((sum, t) => sum + t.amount, 0);
-
-const netCashFlow = actualBankCredits - actualBankDebits;
-```
-
-### 2. True Lifestyle Burn Rate (Accrual / Operating Cost)
-```typescript
-// Sum all active subscriptions' monthlyCost
-const subscriptionsMonthlyBaseline = activeSubscriptions
-  .reduce((sum, s) => sum + s.monthlyCost, 0); // ₹3,451.43
-
-// Regular day-to-day spending (excluding one-off amortized purchases)
-const regularDayToDaySpends = transactions
-  .filter(t => t.type === 'debit' && t.tag === 'Normal')
-  .reduce((sum, t) => sum + t.amount, 0);
-
-const trueMonthlyBurn = regularDayToDaySpends + subscriptionsMonthlyBaseline;
-```
+**Indexes:**
+- `{ nextRenewalDate: 1, status: 1 }` (Instant query for upcoming renewals)
+- `{ status: 1 }` (Quick sum for total monthly recurring baseline)
 
 ---
 
-## 7. Migration Plan from Google Sheets to MongoDB
+## 5. Seed Registry: The 13 Historical Subscriptions
 
-We will create a standalone script: `scripts/migrate-from-sheet.ts`.
-
-1. **Step 1:** Fetch all rows from Google Sheets via the existing read-only GET endpoint (`?action=get_recent&limit=1000`).
-2. **Step 2:**
-   - Filter out all future amortized split rows (`Split M/N`).
-   - Extract the 13 historical subscriptions directly into the `subscriptions` collection with their exact amounts, start dates, and calculated renewal dates:
-     1. `Wifi Worldspace` (₹2500 / 6m &rarr; 25/02/2027)
-     2. `Internet Jio` (₹900 / 3m &rarr; 01/12/2026)
-     3. `Water Tank Cleaning` (₹1500 / 12m &rarr; 01/09/2027)
-     4. `Mediclaim` (₹8000 / 12m &rarr; 22/08/2027)
-     5. `House Insurance` (₹4000 / 12m &rarr; 24/05/2027)
-     6. `Water Filter Servicing` (₹2200 / 12m &rarr; 01/04/2027)
-     7. `Chacha Mediclaim` (₹5000 / 12m &rarr; 21/08/2027)
-     8. `Property Tax` (₹1500 / 12m &rarr; 01/04/2027)
-     9. `GST Filing` (₹500/mo &rarr; 01/04/2027)
-     10. `ITR Filing` (₹2000 / 12m &rarr; 30/08/2027)
-     11. `Domain curiouslymotivated.com` (₹977 / 12m &rarr; 08/02/2027)
-     12. `Domain spwn.in` (₹572 / 12m &rarr; 10/08/2027)
-     13. `YouTube Premium` (₹89/mo &rarr; 01/01/2027)
-3. **Step 3:** Insert all past real transactions (the 24 bank SMS records) into `transactions`.
-4. **Step 4:** Verify that `/summary` outputs the exact ₹3,705.16 bank debit and ₹7,156.59 true burn rate.
+| Service | Category | Total Amount | Cycle | Monthly Share | Start Date | Next Renewal Date |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Internet Jio** | Utilities | ₹900.00 | 3 months | ₹300.00/mo | 01/09/2026 | **01/12/2026** *(in 57d)* |
+| **YouTube Premium** | Streaming | ₹89.00 | 1 month | ₹89.00/mo | 01/01/2026 | **01/11/2026** *(Monthly)* |
+| **curiouslymotivated.com** | Domains | ₹977.00 | 12 months | ₹81.42/mo | 08/02/2026 | **08/02/2027** |
+| **Wifi Worldspace** | Utilities | ₹2,500.00 | 6 months | ₹416.67/mo | 25/08/2026 | **25/02/2027** |
+| **Water Filter Servicing** | Utilities | ₹2,200.00 | 12 months | ₹183.33/mo | 01/04/2026 | **01/04/2027** |
+| **Property Tax** | Tax | ₹1,500.00 | 12 months | ₹125.00/mo | 01/04/2026 | **01/04/2027** |
+| **GST Filing** | Tax | ₹500.00 | 1 month | ₹500.00/mo | 01/04/2026 | **01/11/2026** *(Monthly)* |
+| **House Insurance** | Insurance | ₹4,000.00 | 12 months | ₹333.33/mo | 24/05/2026 | **24/05/2027** |
+| **spwn.in** | Domains | ₹572.00 | 12 months | ₹47.67/mo | 10/08/2026 | **10/08/2027** |
+| **Chacha Mediclaim** | Health | ₹5,000.00 | 12 months | ₹416.67/mo | 21/08/2026 | **21/08/2027** |
+| **Mediclaim** | Health | ₹8,000.00 | 12 months | ₹666.67/mo | 22/08/2026 | **22/08/2027** |
+| **ITR Filing** | Tax | ₹2,000.00 | 12 months | ₹166.67/mo | 30/08/2026 | **30/08/2027** |
+| **Water Tank Cleaning** | Utilities | ₹1,500.00 | 12 months | ₹125.00/mo | 01/09/2026 | **01/09/2027** |
+| **TOTALS** | — | — | — | **₹3,451.43/mo** | — | — |
 
 ---
 
-## 8. Step-by-Step Implementation Roadmap
+## 6. PWA User Experience & Screens
 
-### Phase 1: MongoDB Scaffolding & Connection Pooling
-- Install `mongoose` and `mongodb`.
-- Create `src/db/connection.ts` with Vercel serverless connection caching (preventing connection exhaustion across lambdas).
-- Create `src/models/Transaction.ts` and `src/models/Subscription.ts`.
+### 6.1 View 1: Executive Financial Dashboard
+- **Cash Flow Hero Gauge:**
+  - `Actual Bank Outflow` (Real money spent) vs. `Actual Inflow` (Credits received) &rarr; `Net Bank Balance`.
+  - Fully decoupled from amortized commitments so you never see inflated cash outflow.
+- **Operating Burn Card:**
+  - `True Monthly Burn Rate = Regular Spends + Subscriptions Baseline (₹3,451.43/mo)`.
+  - Visual breakdown bar chart by category (Health, Utilities, Taxes, Food).
+- **Fast Action Bar:**
+  - Floating bottom drawer for instant manual transaction entry with keyboard shortcuts.
 
-### Phase 2: Sheet-to-Mongo Migration Script
-- Run `scripts/migrate-from-sheet.ts` to populate all 13 subscriptions and existing real spends into MongoDB Atlas.
-- Verify data integrity with diagnostic queries.
+### 6.2 View 2: Subscriptions & Renewal Radar
+- **Countdown Cards:** Cards ordered by urgency with dynamic status badges:
+  - 🔴 `Overdue by X days`
+  - 🟡 `Expiring Soon (X days remaining)`
+  - 🟢 `Active (X months remaining)`
+- **Sinking Fund Indicator:** Displays the exact liquid amount (₹3,451.43) recommended to reserve this month to prevent lump-sum shock when annual insurance/mediclaim bills arrive.
+- **Quick Controls:** [Mark Renewed] &bull; [Edit Cycle] &bull; [Pause/Cancel].
 
-### Phase 3: Update Backend Webhooks & Telegram Bot
-- **MacroDroid Webhook (`src/routes/webhooks/macrodroid.ts`):** Writes directly to MongoDB in <50ms.
-- **Telegram Webhook (`src/services/telegram.ts`):** 
-  - Tagging callbacks (3m, 6m, 12m) create/update subscriptions and link the transaction.
-  - `/summary` reads MongoDB directly.
-  - `/renewals` reads MongoDB directly with countdown badges.
-- **Cron routes:** `/api/cron/finance/renewals` checks MongoDB for expiring subscriptions.
-
-### Phase 4: Build React PWA Frontend (`frontend/`)
-- Initialize Vite + React + TypeScript inside `frontend/` matching `@keepspace` structure.
-- Copy KeepSpace design tokens (`index.css`), Plus Jakarta Sans, Space Grotesk, Lucide icons.
-- Build components:
-  - `HeroMetrics.tsx` (Cash Flow vs True Burn)
-  - `RenewalCard.tsx` (Countdown badge, cycle, cost)
-  - `LedgerTable.tsx` (Real-time transaction search, category tagger)
-  - `QuickAddModal.tsx` (Manual cash spend input with amortize buttons)
-- Configure `manifest.json` and service worker for PWA installation.
-
-### Phase 5: Unified Vercel Configuration & Deployment
-- Configure root `vercel.json` rewrites:
-  ```json
-  {
-    "rewrites": [
-      { "source": "/api/(.*)", "destination": "/api/$1" },
-      { "source": "/(.*)", "destination": "/index.html" }
-    ]
-  }
-  ```
-- Build script: builds `frontend/` to `dist/`, builds Express API for serverless.
-- Push to GitHub and deploy to Vercel.
+### 6.3 View 3: Searchable Ledger
+- Instant debounced search across titles, merchants, notes, and raw SMS.
+- Filter chips: `All`, `Debit`, `Credit`, `Amortized`, `Emergency`.
+- One-tap Split Modal: convert any debit into a 3, 6, or 12-month amortization.
 
 ---
 
-## 9. Next Steps to Kick Off Execution
+## 7. REST API Endpoints Specification
 
-1. Add your `MONGODB_URI` to `.env`.
-2. Run Phase 1 & 2 to scaffold MongoDB models and migrate all existing data from Google Sheets.
-3. Build the frontend PWA with KeepSpace aesthetics.
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `GET` | `/api/transactions` | Paginated transactions with filtering by month, year, type, and search query. |
+| `POST` | `/api/transactions` | Manual spend creation from PWA. |
+| `PATCH` | `/api/transactions/:id/amortize` | Convert an existing debit into an amortized schedule. |
+| `GET` | `/api/subscriptions` | List all tracked subscriptions with calculated countdowns and monthly baseline. |
+| `POST` | `/api/subscriptions` | Add a new recurring subscription. |
+| `PATCH` | `/api/subscriptions/:id/renew` | Advance renewal date by the billing cycle upon payment. |
+| `GET` | `/api/finance/summary` | Returns Cash Flow and True Burn metrics for any month (e.g. `?month=9&year=2026`). |
+| `POST` | `/api/webhooks/macrodroid` | Ingests SMS, performs Jev/DeepInfra extraction, writes directly to MongoDB, alerts Telegram. |
+| `POST` | `/api/webhooks/telegram` | Telegram bot command handling (`/summary`, `/renewals`, callback buttons). |
+| `ALL` | `/api/cron/finance/renewals` | Scheduled cron checking for subscriptions expiring within 30 days and alerting Telegram. |
+
+---
+
+## 8. Migration Blueprint: From Sheet to MongoDB
+
+We will provide a zero-downtime migration script (`scripts/migrate-from-sheet.ts`):
+1. **Fetch:** Pulls all rows via Google Apps Script `action=get_recent&limit=500`.
+2. **Sanitize:**
+   - Filters out all generated phantom rows (`Split M/N of...`).
+   - Retains all genuine bank debits, credits, and cash entries.
+3. **Seed Subscriptions:** Automatically seeds the 13 canonical subscriptions with their exact cycles, costs, and renewal dates into `subscriptions`.
+4. **Seed Transactions:** Inserts all historical genuine transactions into `transactions`.
+5. **Verify:** Validates that `actualCashDebited` for September 2026 matches ₹3,705.16 and credits match ₹287.00.
+
+---
+
+## 9. Next Steps for Execution
+
+1. **Database Provisioning:** Provide MongoDB connection URI (MongoDB Atlas free M0 cluster is 100% sufficient).
+2. **Schema & Client Scaffolding:** Add `mongodb` / `mongoose` to backend.
+3. **Frontend PWA Scaffolding:** Initialize Vite + React PWA inside `frontend/` with KeepSpace design system tokens.
+4. **Vercel Unified Monorepo Config:** Configure root `vercel.json` rewrites to serve PWA and API under the same domain.

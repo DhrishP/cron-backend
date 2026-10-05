@@ -3,6 +3,7 @@ import { categorizeWithDeepInfra } from '../../services/deepinfra.js';
 import { sendTransactionAlert } from '../../services/telegram.js';
 import { logInfo, logError } from '../../services/logger.js';
 import { evaluateTransactionWithJev, recordRecentTransaction } from '../../services/jev.js';
+import { createTransaction } from '../../services/transactions.service.js';
 
 export const macrodroidRouter = Router();
 
@@ -131,53 +132,44 @@ macrodroidRouter.post('/', async (req: Request, res: Response) => {
     // Record in recent history for subsequent duplicate detection
     recordRecentTransaction(sms, parsed.title, parsed.amount, parsed.type);
 
-    // Forward to Google Sheets — FLAT fields matching columns:
-    // Date | Title | Type | Amount (₹) | Tag | Effective Monthly (₹) | Raw
-    const sheetWebhookUrl = (process.env.GOOGLE_SHEET_WEBHOOK_URL || '').replace(/['"]/g, '').trim();
-    let forwardStatus = 'skipped';
-    let loggedRow: number | undefined;
+    // 1. Save directly to MongoDB Atlas
+    let dbTxId: string | undefined;
+    try {
+      const typeLower = parsed.type.toLowerCase();
+      let txType: 'debit' | 'credit' | 'transfer' = 'debit';
+      if (typeLower.includes('credit')) txType = 'credit';
+      else if (typeLower.includes('transfer')) txType = 'transfer';
 
-    if (sheetWebhookUrl) {
-      try {
-        const forwardResponse = await fetch(sheetWebhookUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-          body: JSON.stringify({
-            date: new Date().toLocaleDateString('en-IN'),
-            title: parsed.title,
-            type: parsed.type,
-            amount: parsed.amount,
-            tag: parsed.suggestedTag,
-            effectiveMonthly: parsed.effectiveMonthlyCost,
-            raw: sms,
-          }),
-          redirect: 'follow',
-        });
-        if (forwardResponse.ok) {
-          forwardStatus = 'forwarded';
-          const resData = await forwardResponse.json() as { row?: number };
-          loggedRow = resData.row;
-        } else {
-          forwardStatus = 'failed';
-          logError('Google Sheets error', { status: forwardResponse.status });
-        }
-      } catch (fwdErr) {
-        logError('Failed to forward to Google Sheets', fwdErr);
-        forwardStatus = 'error';
-      }
+      const tag: 'Normal' | 'Amortized' | 'Emergency' | 'Transfer' =
+        parsed.suggestedTag === 'Emergency' ? 'Emergency' : (parsed.suggestedTag === 'Transfer' ? 'Transfer' : 'Normal');
+
+      const savedTx = await createTransaction({
+        title: parsed.title,
+        amount: parsed.amount,
+        type: txType,
+        category: parsed.category || 'Everyday Spend',
+        tag,
+        effectiveMonthly: parsed.effectiveMonthlyCost || parsed.amount,
+        rawSms: sms,
+        date: new Date(),
+        source: 'sms_macrodroid',
+      });
+      dbTxId = savedTx._id?.toString();
+      logInfo('Saved transaction to MongoDB', { id: dbTxId, title: parsed.title, amount: parsed.amount });
+    } catch (dbErr) {
+      logError('Failed to save transaction to MongoDB', dbErr);
     }
 
-    // Telegram alert for spends >= ₹1,500
+    // 2. Telegram alert for spends >= ₹1,500
     let telegramAlertSent = false;
     if (parsed.amount >= 1500) {
-      telegramAlertSent = await sendTransactionAlert(parsed, loggedRow);
+      telegramAlertSent = await sendTransactionAlert(parsed, dbTxId);
     }
-
 
     res.status(200).json({
       success: true,
       data: parsed,
-      googleSheetSync: forwardStatus,
+      dbId: dbTxId,
       telegramAlert: telegramAlertSent,
     });
   } catch (error) {
