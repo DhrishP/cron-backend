@@ -206,8 +206,11 @@ export async function getMonthlyCashFlowMetrics(month: number, year: number): Pr
 
   const txs = await col
     .find({
-      date: { $gte: start, $lt: end },
-    })
+      $or: [
+        { date: { $gte: start, $lt: end } },
+        { date: { $gte: start.toISOString(), $lt: end.toISOString() } },
+      ],
+    } as Filter<TransactionDoc>)
     .toArray();
 
   let actualCashDebited = 0;

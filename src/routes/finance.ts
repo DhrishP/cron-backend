@@ -12,6 +12,7 @@ financeRouter.get('/summary', async (req: Request, res: Response) => {
     const year = req.query.year !== undefined ? parseInt(req.query.year as string, 10) : undefined;
 
     const summary = await getComprehensiveMonthlySummary(month, year);
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     res.status(200).json({ success: true, summary });
   } catch (err) {
     logError('Error fetching monthly finance summary', err);
