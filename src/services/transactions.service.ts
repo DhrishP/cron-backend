@@ -12,6 +12,8 @@ export interface TransactionFilterOptions {
   search?: string;
   limit?: number;
   offset?: number;
+  sortBy?: 'date' | 'amount';
+  sortOrder?: 'asc' | 'desc';
 }
 
 export function getISTMonthRange(month: number, year: number): { start: Date; end: Date } {
@@ -89,23 +91,37 @@ export async function getTransactions(options: TransactionFilterOptions = {}): P
     ];
   }
 
-  const limit = options.limit || 100;
+  const limit = options.limit !== undefined ? options.limit : 500;
   const skip = options.offset || 0;
 
+  let queryBuilder = col.find(query);
+  if (skip > 0) queryBuilder = queryBuilder.skip(skip);
+  if (limit > 0) queryBuilder = queryBuilder.limit(limit);
+
   const [transactions, total] = await Promise.all([
-    col.find(query).sort({ date: -1 }).skip(skip).limit(limit).toArray(),
+    queryBuilder.toArray(),
     col.countDocuments(query),
   ]);
 
-  // Sort debits/credits/transfers first by date descending, amortized last
+  const sortBy = options.sortBy || 'date';
+  const sortOrder = options.sortOrder || 'desc';
+
   transactions.sort((a, b) => {
+    if (sortBy === 'amount') {
+      const aVal = a.amount;
+      const bVal = b.amount;
+      return sortOrder === 'asc' ? aVal - bVal : bVal - aVal;
+    }
+
+    // Default Date sorting: debits/credits/transfers first by date descending, amortized last
     const aAmort = a.type === 'amortized' || (a.tag && a.tag.toLowerCase().includes('amortized'));
     const bAmort = b.type === 'amortized' || (b.tag && b.tag.toLowerCase().includes('amortized'));
 
     if (!aAmort && bAmort) return -1;
     if (aAmort && !bAmort) return 1;
 
-    return new Date(b.date).getTime() - new Date(a.date).getTime();
+    const diff = new Date(b.date).getTime() - new Date(a.date).getTime();
+    return sortOrder === 'asc' ? -diff : diff;
   });
 
   return { transactions, total };

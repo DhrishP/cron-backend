@@ -20,8 +20,10 @@ transactionsRouter.get('/', async (req: Request, res: Response) => {
     const category = req.query.category as string | undefined;
     const tag = req.query.tag as TransactionTag | undefined;
     const search = req.query.search as string | undefined;
-    const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 50;
+    const limit = req.query.limit !== undefined ? parseInt(req.query.limit as string, 10) : 500;
     const offset = req.query.offset ? parseInt(req.query.offset as string, 10) : 0;
+    const sortBy = req.query.sortBy as 'date' | 'amount' | undefined;
+    const sortOrder = req.query.sortOrder as 'asc' | 'desc' | undefined;
 
     const result = await getTransactions({
       month,
@@ -32,6 +34,8 @@ transactionsRouter.get('/', async (req: Request, res: Response) => {
       search,
       limit,
       offset,
+      sortBy,
+      sortOrder,
     });
 
     res.status(200).json({ success: true, ...result });
